@@ -17,3 +17,4 @@ docutils==0.17.1
 
 # Needed by tests/test_sockets.py
 websockify==0.10.0
+zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability

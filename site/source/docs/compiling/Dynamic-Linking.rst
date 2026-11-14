@@ -6,13 +6,13 @@ Dynamic Linking
 
 .. note:: This documentation is somewhat outdated and is in the process of being refreshed.
 
-Emscripten supports linking object files (and ar archives that contain
+Emscripten supports linking object files (and ``ar`` archives that contain
 object files) statically.  This lets most build systems work with Emscripten
 with little or no changes (see :ref:`Building-Projects`).
 
-In addition, Emscripten also has support for a form of **dynamic** linking of
+In addition, Emscripten also has support for **dynamic** linking of
 WebAssembly modules.  This can add overhead, so for best performance static
-linking should still be preferred.  However, this overhead can can be reduced
+linking should still be preferred.  However, this overhead can be reduced
 with the use of certain command line flags. See below for details.
 
 Background
@@ -109,9 +109,9 @@ along with the main module, during startup and they are linked together
 before your application starts to run.
 
 -  Build one part of your code as the main module, linking it using
-   ``-s MAIN_MODULE``.
+   ``-sMAIN_MODULE`` (See :ref:`MAIN_MODULE`).
 -  Build other parts of your code as side modules, linking it using
-   ``-s SIDE_MODULE``.
+   ``-shared`` (or the emscripten-specific :ref:`SIDE_MODULE` setting).
 
 For the main module the output suffix should be ``.js`` (the WebAssembly
 file will be generated alongside it just like normal).  For the side
@@ -125,9 +125,9 @@ the command line when you link the main module. e.g.
 
 ::
 
-     emcc -s MAIN_MODULE main.c libsomething.wasm
+     emcc -sMAIN_MODULE main.c libsomething.wasm
 
-At runtime, the JavaScript loading code will load ``libsomthing.wasm`` (along
+At runtime, the JavaScript loading code will load ``libsomething.wasm`` (along
 with any other side modules) along with the main module before the application
 starts to run.  The running application then can access code from any of the
 modules linked together.
@@ -135,7 +135,7 @@ modules linked together.
 Runtime Dynamic Linking with ``dlopen()``
 -----------------------------------------
 
-Runtime dynamic linking can be performed by the calling the ``dlopen()``
+Runtime dynamic linking can be performed by calling the ``dlopen()``
 function to load side modules after the program is already running. The
 procedure begins in the same way, with the same flags used to build the main and
 side modules.  The difference is that you do not specify the side modules on the
@@ -145,22 +145,33 @@ it (except for ``dlopen(NULL)`` which means to open the current executable,
 which just works without filesystem integration). That’s basically it - you can
 then use ``dlopen(), dlsym()``, etc. normally.
 
-System Libraries
-================
+Building Dynamic Libraries using ``-shared``
+============================================
 
-As mentioned earlier, system libraries are handled in a special way by
-the Emscripten linker, and in dynamic linking, only the main module is
-linked against system libraries. A possible issue is if a side module
-depends on a system library that the main does not. If so, you’ll get a
-runtime error. This section explains what to do to fix that.
+In traditional toolchains the ``-shared`` flag is used to generate dynamic
+libraries.  Historically, due to early limitations, Emscripten would produce a
+fake dynamic library (along with a warning) when the ``-shared`` flag was used.
+When your main program is linked against these fake dynamic libraries they would
+be linked into your main program like regular static object files.
 
-To get around this, you can build the main module with
-``EMCC_FORCE_STDLIBS=1`` in the environment to force inclusion of all
-standard libs. A more refined approach is to build the side module with
-``-v`` in order to see which system libs are actually needed - look for
-``including lib[...]`` messages - and then building the main module with
-something like ``EMCC_FORCE_STDLIBS=libcxx,libcxxabi`` (if you need
-those two libs).
+These days Emscripten will produce real dynamic libraries by default when
+``-shared`` is used.  Note that ``-shared`` differs slightly from both
+``-sSIDE_MODULE=1`` and ``-sSIDE_MODULE=2`` in order to match native linker
+behaviour:
+
+- Unlike ``-sSIDE_MODULE=1``, static archives (``.a`` files) are not wrapped in
+  ``--whole-archive``, so only referenced archive members are linked in.
+- Unlike ``-sSIDE_MODULE=2``, ``--no-export-dynamic`` is not passed to the
+  linker, so all default-visibility symbols in linked object files are exported
+  automatically without needing ``EMSCRIPTEN_KEEPALIVE`` or
+  :ref:`EXPORTED_FUNCTIONS`.
+
+If both ``-shared`` and ``-sSIDE_MODULE`` are specified on the command line,
+the explicit ``SIDE_MODULE`` setting takes precedence.
+
+This behaviour can be controlled using the :ref:`FAKE_DYLIBS` setting.  If you
+prefer the older behaviour with fake dynamic libraries you can enable this
+setting.
 
 Code Size
 =========
@@ -169,21 +180,41 @@ By default, main modules disable dead code elimination. That means that
 all the code compiled remains in the output, including all system
 libraries linked in, and also all the JS library code.
 
-That is the default behavior since it is the least surprising. But it is
-also possible to use normal dead code elimination, by building with
-``-s MAIN_MODULE=2`` (instead of 1). In that mode, the main module is
-built normally, with no special behavior for keeping code alive. It is
-then your responsibility to make sure that code that side modules need
-is kept alive. You can do this either by adding to ``EXPORTED_FUNCTIONS`` or
-tagging the symbol ``EMSCRIPTEN_KEEPALIVE`` in the source code.
-See ``other.test_minimal_dynamic`` for an example of this in action.
+That is the default behavior since it is the least surprising. But it is also
+possible to use normal dead code elimination, by building with
+``-sMAIN_MODULE=2`` (instead of 1). In that mode, the main module is built
+normally, with no special behavior for keeping code alive. It is then your
+responsibility to make sure that code that side modules need is kept alive. You
+can do this either by adding to :ref:`EXPORTED_FUNCTIONS` or tagging the symbol
+``EMSCRIPTEN_KEEPALIVE`` in the source code. See ``other.test_minimal_dynamic``
+for an example of this in action.
 
 If you are doing load time dynamic linking then any symbols needed by
 the side modules specified on the command line will be kept alive
 automatically. For this reason we strongly recommend using ``MAIN_MODULE=2``
 when doing load time dynamic linking.
 
-There is also the corresponding ``-s SIDE_MODULE=2`` for side modules.
+There is also the corresponding ``-sSIDE_MODULE=2`` for side modules.
+
+System Libraries
+================
+
+As mentioned earlier, system libraries are handled in a special way by the
+Emscripten linker, and in dynamic linking, only the main module is linked
+against system libraries. When linking the main module it is possible to pass
+the side modules on the command line, in which case any system library
+dependencies are automatically handled.
+
+However when linking a main module without its side modules (Usually with
+``-sMAIN_MODULE=1``) it is possible that required system libraries are not
+included.  This section explains what to do to fix that by forcing the main
+module to be linked against certain libraries.
+
+You can build the main module with ``EMCC_FORCE_STDLIBS=1`` in the environment
+to force inclusion of all standard libs.  A more refined approach is to name the
+system libraries that you want to explicitly include.  For example, with
+something like ``EMCC_FORCE_STDLIBS=libcxx,libcxxabi`` (if you need those two
+libs).
 
 Miscellaneous Notes
 ===================
@@ -198,25 +229,43 @@ symbols remain unresolved, and code can start to run even if there are.
 It will run successfully if they are not called in practice. If they
 are, you will get a runtime error. What went wrong should be clear from
 the stack trace (in an unminified build); building with
-``-s ASSERTIONS`` can help some more.
+:ref:`ASSERTIONS` can help some more.
 
 Limitations
 -----------
 
--  Chromium does not support compiling >4kB WASM on the main thread, and
-   that includes side modules; you can use ``--use-preload-plugins`` (in
-   ``emcc`` or ``file_packager.py``) to make Emscripten compile them on
-   startup
-   `[doc] <https://emscripten.org/docs/porting/files/packaging_files.html#preloading-files>`__
-   `[discuss] <https://groups.google.com/forum/#!topic/emscripten-discuss/cE3hUV3fDSw>`__.
+- Chromium does not support synchronous compiling of Wasm modules over 8Mb on
+  the main thread.  You could run into this limit when using the synchronous
+  ``dlopen`` API to load large side modules.   Emscripten has async versions of
+  ``dlopen`` that can work around this issue (See :c:func:`emscripten_dlopen`).
+- ``EM_ASM`` and ``EM_JS`` code defined within side modules depends on ``eval``
+  support and are therefore incompatible with ``-sDYNAMIC_EXECUTION=0`` (See
+  :ref:`DYNAMIC_EXECUTION`).
+
 
 Pthreads support
 ----------------
 
-Dynamic linking + pthreads is is still experimental.  While you can link with
-``MAIN_MODULE`` and ``-pthread`` emscripten will produce a warning by default
-when you do this.
+Dynamic linking + pthreads is still experimental.  As such, linking with both
+:ref:`MAIN_MODULE` and ``-pthread`` will produce a warning.
 
-While load-time dynamic linking should largely work and does not have any major
-known issues, runtime dynamic linking (with ``dlopen()``) has limited support
-when used with pthreads.
+While load-time dynamic linking works without any complications, runtime dynamic
+linking via ``dlopen``/``dlsym`` can require some extra consideration.  The
+reason for this is that keeping the indirection function pointer table in sync
+between threads has to be done by emscripten library code.  Each time a new
+library is loaded or a new symbol is requested via ``dlsym``, table slots can be
+added and these changes need to be mirrored on every thread in the process.
+
+Changes to the table are protected by a mutex, and before any thread returns
+from ``dlopen`` or ``dlsym`` it will wait until all other threads are sync.  In
+order to make this synchronization as seamless as possible, we hook into the
+low level primitives of `emscripten_futex_wait` and `emscripten_yield`.
+
+For most use cases all this happens under hood and no special action is needed.
+However, there is one class of application that currently may require
+modification.  If your applications busy waits, or directly uses the
+``atomic.waitXX`` instructions (or the clang
+``__builtin_wasm_memory_atomic_waitXX`` builtins) you maybe need to switch it
+to use ``emscripten_futex_wait`` in order to avoid deadlocks.  If you don't use
+``emscripten_futex_wait`` while you block, you could potentially block other
+threads that are calling ``dlopen`` and/or ``dlsym``.

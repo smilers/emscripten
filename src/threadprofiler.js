@@ -1,10 +1,12 @@
+#preprocess
+
 /**
  * @license
  * Copyright 2015 The Emscripten Authors
  * SPDX-License-Identifier: MIT
  */
 
-var emscriptenThreadProfiler = {
+const emscriptenThreadProfiler = {
   // UI update interval in milliseconds.
   uiUpdateIntervalMsecs: 1000,
 
@@ -12,95 +14,101 @@ var emscriptenThreadProfiler = {
   threadProfilerDiv: null,
 
   // Installs startup hook and periodic UI update timer.
-  initialize: function initialize() {
-    this.threadProfilerDiv = document.getElementById('threadprofiler');
-    if (!this.threadProfilerDiv) {
-      var div = document.createElement("div");
+  initialize() {
+    const self = emscriptenThreadProfiler;
+    self.threadProfilerDiv = document.getElementById('threadprofiler');
+    if (!self.threadProfilerDiv) {
+      const div = document.createElement("div");
       div.innerHTML = "<div id='threadprofiler' style='margin: 20px; border: solid 1px black;'></div>";
       document.body.appendChild(div);
-      this.threadProfilerDiv = document.getElementById('threadprofiler');
+      self.threadProfilerDiv = document.getElementById('threadprofiler');
     }
-    setInterval(function() { emscriptenThreadProfiler.updateUi() }, this.uiUpdateIntervalMsecs);
+    const i = setInterval(() => self.updateUi(), self.uiUpdateIntervalMsecs);
+    addOnExit(() => clearInterval(i));
   },
 
-  initializeNode: function initializeNode() {
+  initializeNode() {
     addOnInit(() => {
-      emscriptenThreadProfiler.dumpState();
-      setInterval(function() { emscriptenThreadProfiler.dumpState() }, this.uiUpdateIntervalMsecs);
+      const self = emscriptenThreadProfiler;
+      self.dumpState();
+      const i = setInterval(() => self.dumpState(), self.uiUpdateIntervalMsecs);
+      addOnExit(() => clearInterval(i));
     });
   },
 
-  dumpState: function dumpState() {
-    var mainThread = _emscripten_main_browser_thread_id();
+  dumpState() {
+    const mainThread = _emscripten_main_runtime_thread_id();
 
-    var threads = [mainThread];
-    for (var i in PThread.pthreads) {
-      threads.push(PThread.pthreads[i].threadInfoStruct);
+    const threads = [mainThread];
+    for (const thread of Object.values(PThread.pthreads)) {
+      threads.push(thread.pthread_ptr);
     }
-    for (var i = 0; i < threads.length; ++i) {
-      var threadPtr = threads[i];
-      var profilerBlock = Atomics.load(HEAPU32, (threadPtr + 8 /* {{{ C_STRUCTS.pthread.profilerBlock }}}*/) >> 2);
-      var threadName = PThread.getThreadName(threadPtr);
+    for (const threadPtr of threads) {
+      let threadName = PThread.getThreadName(threadPtr);
       if (threadName) {
-        threadName = '"' + threadName + '" (0x' + threadPtr.toString(16) + ')';
+        threadName = `"${threadName}" (${ptrToString(threadPtr)})`;
       } else {
-        threadName = '(0x' + threadPtr.toString(16) + ')';
+        threadName = `(${ptrToString(threadPtr)})`;
       }
 
-      console.log('Thread ' + threadName + ' now: ' + PThread.threadStatusAsString(threadPtr) + '. ');
+      console.log(`Thread ${threadName} now: ${PThread.threadStatusAsString(threadPtr)}. `);
     }
   },
 
-  updateUi: function updateUi() {
-    if (typeof PThread == 'undefined') {
+  updateUi() {
+    if (typeof PThread === 'undefined') {
       // Likely running threadprofiler on a singlethreaded build, or not
       // initialized yet, ignore updating.
       return;
     }
-    var str = '';
-    var mainThread = _emscripten_main_browser_thread_id();
+    if (!runtimeInitialized) {
+      return;
+    }
+    let str = '';
+    const mainThread = _emscripten_main_runtime_thread_id();
 
-    var threads = [mainThread];
-    for (var i in PThread.pthreads) {
-      threads.push(PThread.pthreads[i].threadInfoStruct);
+    const threads = [mainThread];
+    for (const thread of Object.values(PThread.pthreads)) {
+      threads.push(thread.pthread_ptr);
     }
 
-    for (var i = 0; i < threads.length; ++i) {
-      var threadPtr = threads[i];
-      var profilerBlock = Atomics.load(HEAPU32, (threadPtr + 8 /* {{{ C_STRUCTS.pthread.profilerBlock }}}*/) >> 2);
-      var threadName = PThread.getThreadName(threadPtr);
+    for (const threadPtr of threads) {
+      let profilerBlock = Atomics.load({{{ getHeapForType('*') }}}, {{{ getHeapOffset('threadPtr + ' + C_STRUCTS.pthread.profilerBlock, '*') }}});
+#if MEMORY64
+      profilerBlock = Number(profilerBlock);
+#endif
+      let threadName = PThread.getThreadName(threadPtr);
       if (threadName) {
-        threadName = '"' + threadName + '" (0x' + threadPtr.toString(16) + ')';
+        threadName = `"${threadName}" (${ptrToString(threadPtr)})`;
       } else {
-        threadName = '(0x' + threadPtr.toString(16) + ')';
+        threadName = `(${ptrToString(threadPtr)})`;
       }
 
-      str += 'Thread ' + threadName + ' now: ' + PThread.threadStatusAsString(threadPtr) + '. ';
+      str += `Thread ${threadName} now: ${PThread.threadStatusAsString(threadPtr)}. `;
 
-      var threadTimesInStatus = [];
-      var totalTime = 0;
-      for (var j = 0; j < 7/*EM_THREAD_STATUS_NUMFIELDS*/; ++j) {
-        threadTimesInStatus.push(HEAPF64[((profilerBlock + 16/*C_STRUCTS.thread_profiler_block.timeSpentInStatus*/) >> 3) + j]);
+      const threadTimesInStatus = [];
+      let totalTime = 0;
+      let offset = profilerBlock + {{{ C_STRUCTS.thread_profiler_block.timeSpentInStatus }}};
+      for (let j = 0; j < {{{ cDefs.EM_THREAD_STATUS_NUMFIELDS }}}; ++j, offset += 8) {
+        threadTimesInStatus.push({{{ makeGetValue('offset', 0, 'double') }}});
         totalTime += threadTimesInStatus[j];
-        HEAPF64[((profilerBlock + 16/*C_STRUCTS.thread_profiler_block.timeSpentInStatus*/) >> 3) + j] = 0;
+        {{{ makeSetValue('offset', 0, 0, 'double') }}};
       }
-      var recent = '';
-      if (threadTimesInStatus[1] > 0) recent += (threadTimesInStatus[1] / totalTime * 100.0).toFixed(1) + '% running. ';
-      if (threadTimesInStatus[2] > 0) recent += (threadTimesInStatus[2] / totalTime * 100.0).toFixed(1) + '% sleeping. ';
-      if (threadTimesInStatus[3] > 0) recent += (threadTimesInStatus[3] / totalTime * 100.0).toFixed(1) + '% waiting for futex. ';
-      if (threadTimesInStatus[4] > 0) recent += (threadTimesInStatus[4] / totalTime * 100.0).toFixed(1) + '% waiting for mutex. ';
-      if (threadTimesInStatus[5] > 0) recent += (threadTimesInStatus[5] / totalTime * 100.0).toFixed(1) + '% waiting for proxied ops. ';
-      if (recent.length > 0) str += 'Recent activity: ' + recent;
+      let recent = '';
+      if (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_RUNNING }}}] > 0) recent += (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_RUNNING }}}] / totalTime * 100.0).toFixed(1) + '% running. ';
+      if (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_SLEEPING }}}] > 0) recent += (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_SLEEPING }}}] / totalTime * 100.0).toFixed(1) + '% sleeping. ';
+      if (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_WAITFUTEX }}}] > 0) recent += (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_WAITFUTEX }}}] / totalTime * 100.0).toFixed(1) + '% waiting for futex. ';
+      if (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_WAITMUTEX }}}] > 0) recent += (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_WAITMUTEX }}}] / totalTime * 100.0).toFixed(1) + '% waiting for mutex. ';
+      if (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_WAITPROXY }}}] > 0) recent += (threadTimesInStatus[{{{ cDefs.EM_THREAD_STATUS_WAITPROXY }}}] / totalTime * 100.0).toFixed(1) + '% waiting for proxied ops. ';
+      if (recent.length > 0) str += `Recent activity: ${recent}`;
       str += '<br />';
     }
-    this.threadProfilerDiv.innerHTML = str;
+    emscriptenThreadProfiler.threadProfilerDiv.innerHTML = str;
   }
 };
 
-if (typeof Module != 'undefined') {
-  if (typeof document != 'undefined') {
-    emscriptenThreadProfiler.initialize();
-  } else if (!ENVIRONMENT_IS_PTHREAD && typeof process != 'undefined') {
-    emscriptenThreadProfiler.initializeNode();
-  }
+if (globalThis.document) {
+  emscriptenThreadProfiler.initialize();
+} else if (!ENVIRONMENT_IS_PTHREAD && globalThis.process) {
+  emscriptenThreadProfiler.initializeNode();
 }

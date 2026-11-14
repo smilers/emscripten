@@ -1,4 +1,4 @@
-//===------------------------- cxa_handlers.h -----------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -19,11 +19,11 @@
 namespace std
 {
 
-_LIBCXXABI_HIDDEN _LIBCXXABI_NORETURN
+[[noreturn]] _LIBCXXABI_HIDDEN
 void
 __unexpected(unexpected_handler func);
 
-_LIBCXXABI_HIDDEN _LIBCXXABI_NORETURN
+[[noreturn]] _LIBCXXABI_HIDDEN
 void
 __terminate(terminate_handler func) noexcept;
 

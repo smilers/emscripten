@@ -73,11 +73,11 @@ Typically you will have a small section with ``#ifdef __EMSCRIPTEN__`` for the t
   // Our "main loop" function. This callback receives the current time as
   // reported by the browser, and the user data we provide in the call to
   // emscripten_request_animation_frame_loop().
-  EM_BOOL one_iter(double time, void* userData) {
+  bool one_iter(double time, void* userData) {
     // Can render to the screen here, etc.
     puts("one iteration");
     // Return true to keep the loop running.
-    return EM_TRUE;
+    return true;
   }
 
   int main() {
@@ -122,7 +122,7 @@ You can add additional operations with :js:func:`addRunDependency`, which is a c
 
 .. note:: Generally it is not necessary to add additional operations — preloading is suitable for almost all use cases.
 
-When all dependencies are met, Emscripten will call ``run()``, which proceeds to call your ``main()`` function. The ``main()`` function should be used to perform initialization tasks, and will often call :c:func:`emscripten_set_main_loop` (as :ref:`described above <emscripten-runtime-environment-howto-main-loop>`). The main loop function will be then be called at the requested frequency.
+When all dependencies are met, Emscripten will call your programs's ``main()`` function. The ``main()`` function should be used to perform initialization tasks, and will often call :c:func:`emscripten_set_main_loop` (as :ref:`described above <emscripten-runtime-environment-howto-main-loop>`). The main loop function will be then be called at the requested frequency.
 
 You can affect the operation of the main loop in several ways:
 

@@ -13,8 +13,8 @@
 
 /* getifaddrs() reports hardware addresses with PF_PACKET that implies
  * struct sockaddr_ll.  But e.g. Infiniband socket address length is
- * longer than sockaddr_ll.ssl_addr[8] can hold. Use this hack struct
- * to extend ssl_addr - callers should be able to still use it. */
+ * longer than sockaddr_ll.sll_addr[8] can hold. Use this hack struct
+ * to extend sll_addr - callers should be able to still use it. */
 struct sockaddr_ll_hack {
 	unsigned short sll_family, sll_protocol;
 	int sll_ifindex;
@@ -39,8 +39,8 @@ struct ifaddrs_storage {
 };
 
 struct ifaddrs_ctx {
-	struct ifaddrs_storage *first;
-	struct ifaddrs_storage *last;
+	struct ifaddrs *first;
+	struct ifaddrs *last;
 	struct ifaddrs_storage *hash[IFADDRS_HASH_SIZE];
 };
 
@@ -195,9 +195,9 @@ static int netlink_msg_to_ifaddr(void *pctx, struct nlmsghdr *h)
 	}
 
 	if (ifs->ifa.ifa_name) {
-		if (!ctx->first) ctx->first = ifs;
-		if (ctx->last) ctx->last->ifa.ifa_next = &ifs->ifa;
-		ctx->last = ifs;
+		if (!ctx->first) ctx->first = &ifs->ifa;
+		if (ctx->last) ctx->last->ifa_next = &ifs->ifa;
+		ctx->last = &ifs->ifa;
 	} else {
 		free(ifs);
 	}
@@ -210,7 +210,7 @@ int getifaddrs(struct ifaddrs **ifap)
 	int r;
 	memset(ctx, 0, sizeof *ctx);
 	r = __rtnetlink_enumerate(AF_UNSPEC, AF_UNSPEC, netlink_msg_to_ifaddr, ctx);
-	if (r == 0) *ifap = &ctx->first->ifa;
-	else freeifaddrs(&ctx->first->ifa);
+	if (r == 0) *ifap = ctx->first;
+	else freeifaddrs(ctx->first);
 	return r;
 }

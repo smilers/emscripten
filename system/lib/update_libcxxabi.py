@@ -5,22 +5,27 @@
 # found in the LICENSE file.
 
 import os
-import sys
 import shutil
 
-script_dir = os.path.abspath(os.path.dirname(__file__))
-emscripten_root = os.path.dirname(os.path.dirname(script_dir))
-default_llvm_dir = os.path.join(os.path.dirname(emscripten_root), 'llvm-project')
+from update_common import (
+  clean_dir,
+  copy_tree,
+  default_llvm_dir,
+  parse_args,
+  script_dir,
+  update_readme,
+)
+
 local_root = os.path.join(script_dir, 'libcxxabi')
 local_src = os.path.join(local_root, 'src')
 local_inc = os.path.join(local_root, 'include')
 
+excludes = ('CMakeLists.txt',)
+preserve_files = ('cxa_exception_js_utils.cpp', '__cpp_exception.S')
+
 
 def main():
-  if len(sys.argv) > 1:
-    llvm_dir = os.path.join(os.path.abspath(sys.argv[1]))
-  else:
-    llvm_dir = default_llvm_dir
+  llvm_dir = parse_args(default_llvm_dir, 'llvm_dir')
   upstream_root = os.path.join(llvm_dir, 'libcxxabi')
   upstream_src = os.path.join(upstream_root, 'src')
   upstream_inc = os.path.join(upstream_root, 'include')
@@ -28,13 +33,14 @@ def main():
   assert os.path.exists(upstream_src)
 
   # Remove old version
-  shutil.rmtree(local_src)
-  shutil.rmtree(local_inc)
+  clean_dir(local_src, preserve_files)
+  clean_dir(local_inc, preserve_files)
 
-  shutil.copytree(upstream_src, local_src)
-  shutil.copytree(upstream_inc, local_inc)
+  copy_tree(upstream_src, local_src, excludes)
+  copy_tree(upstream_inc, local_inc, excludes)
   shutil.copy2(os.path.join(upstream_root, 'CREDITS.TXT'), local_root)
   shutil.copy2(os.path.join(upstream_root, 'LICENSE.TXT'), local_root)
+  update_readme(local_root, llvm_dir)
 
 
 if __name__ == '__main__':

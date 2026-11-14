@@ -1,4 +1,4 @@
-.. _wasm_workers:
+.. _wasm workers section:
 
 ================
 Wasm Workers API
@@ -18,24 +18,26 @@ Quick Example
 
   void run_in_worker()
   {
-    printf("Hello from wasm worker!\n");
+    printf("Hello from Wasm Worker!\n");
   }
 
   int main()
   {
-    emscripten_wasm_worker_t worker = emscripten_malloc_wasm_worker(/*stack size: */1024);
+    emscripten_wasm_worker_t worker = emscripten_malloc_wasm_worker(/*stackSize: */4096);
     emscripten_wasm_worker_post_function_v(worker, run_in_worker);
   }
 
-Build the code by passing the Emscripten flag ``-sWASM_WORKERS=1`` at both compile
+Build the code by passing the Emscripten flag ``-sWASM_WORKERS`` at both compile
 and link steps. The example code creates a new Worker on the main browser thread,
 which shares the same WebAssembly.Module and WebAssembly.Memory object. Then a
 ``postMessage()`` is passed to the Worker to ask it to execute the function
 ``run_in_worker()`` to print a string.
 
-For more complex threading scenarios, see the functions ``emscripten_create_wasm_worker_with_tls()``
-and ``emscripten_create_wasm_worker_no_tls()`` on how to manage the memory resources that
-the thread will use.
+To explicitly control the memory allocation placement when creating a worker,
+use the ``emscripten_create_wasm_worker()`` function. This function takes a
+region of memory that must be large enough to hold both the stack and the TLS
+data for the worker.  You can use ``__builtin_wasm_tls_size()`` to find out at
+runtime how much space is required for the program's TLS data.
 
 Introduction
 ============
@@ -84,22 +86,37 @@ the middle.
 Pthreads and Wasm Workers share several similarities:
 
  * Both can use emscripten_atomic_* Atomics API,
+ * Both can use emscripten_futex_wait/wake API,
  * Both can use GCC __sync_* Atomics API,
  * Both can use C11 and C++11 Atomics APIs,
  * Both types of threads have a local stack.
  * Both types of threads have thread-local storage (TLS) support via ``thread_local`` (C++11),
    ``_Thread_local`` (C11) and ``__thread`` (GNU11) keywords.
  * Both types of threads support TLS via explicitly linked in Wasm globals (see
-   ``tests/wasm_worker/wasm_worker_tls_wasm_assembly.c/.S`` for example code)
+   ``test/wasm_worker/wasm_worker_tls_wasm_assembly.c/.S`` for example code)
  * Both types of threads have a concept of a thread ID (``pthread_self()`` for pthreads,
-   ``emscripten_wasm_worker_self_id()`` for Wasm Workers)
+   ``emscripten_wasm_worker_self_id()`` for Wasm Workers).  `gettid()` works in
+   both contexts so is more portable.
  * Both types of threads can perform an event-based and an infinite loop programming model.
  * Both can use ``EM_ASM`` and ``EM_JS`` API to execute JS code on the calling thread.
  * Both can call out to JS library functions (linked in with ``--js-library`` directive) to
    execute JS code on the calling thread.
- * Neither pthreads nor Wasm Workers can be used in conjunction with ``-sSINGLE_FILE=1`` linker flag.
+ * Neither pthreads nor Wasm Workers can be used in conjunction with ``-sSINGLE_FILE`` linker flag.
 
 However, the differences are more notable.
+
+C11 thread APIs are not available under Wasm Workers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Becuase our C11 threading API is based on pthreads internally these APIs are not
+available under Wasm Worker.
+
+Some standard C++ APIs are not available under Wasm Workers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some parts of the libc++ stndard library are not available under Wasm Workers
+becuase they depend on pthreads internally.  For example `std::call_once``:
+https://github.com/emscripten-core/emscripten/issues/26375.
 
 Pthreads can proxy JS functions
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -114,8 +131,6 @@ function with Wasm Workers can be done by explicitly passing the address of that
 If you need to synchronously wait for the posted function to finish from within a Worker, use one of
 the ``emscripten_wasm_worker_*()`` thread synchronization functions to sleep the calling thread until
 the callee has finished the operation.
-
-Note that Wasm Workers cannot 
 
 Pthreads have cancellation points
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -151,17 +166,34 @@ a Wasm Worker, consider which type of hierarchy you would like, and if necessary
 hierarchy manually by posting the Worker creation over to the main thread yourself.
 
 Note that support for nested Workers varies across browsers. As of 02/2022, nested Workers are `not
-supported in Safari <https://bugs.webkit.org/show_bug.cgi?id=22723>`_. See `here 
+supported in Safari <https://webkit.org/b/22723>`_. See `here 
 <https://github.com/johanholmerin/nested-worker>`_ for a polyfill.
 
-Pthreads can use the Wasm Worker synchronization API, but not vice versa
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Pthreads can use the Wasm Worker synchronization API
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The multithreading synchronization primitives offered in ``emscripten/wasm_worker.h``
 (``emscripten_lock_*``, ``emscripten_semaphore_*``, ``emscripten_condvar_*``) can be freely invoked
-from within pthreads if one so wishes, but Wasm Workers cannot utilize any of the synchronization
-functionality in the Pthread API (``pthread_mutex_*``, ``pthread_cond_``, ``pthread_rwlock_*``, etc),
-since they lack the needed pthread runtime.
+from within pthreads if one so wishes.
+
+Wasm Workers cannot use the pthread API, unless building in hybrid mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+By default, Wasm Workers cannot call any pthread APIs (``pthread_mutex_*``,
+``pthread_cond_*``, ``pthread_self()``, etc.), since they lack the needed
+thread metadata.
+
+However, when building in **hybrid mode** (linking with both ``-sWASM_WORKERS``
+and ``-pthread``), Wasm Workers are created with the additional metadata needed.
+In this mode, Wasm Workers support a subset of the pthread API:
+
+- ``pthread_self()`` and ``pthread_equal()``
+- Thread Specific Data (TSD) via ``pthread_getspecific()`` and ``pthread_setspecific()``
+- Thread synchronization API such was `pthread_mutex_*` and `pthread_cond_*`.
+
+APIs that manage the thread lifecycle (like ``pthread_create``,
+``pthread_join``, ``pthread_detach``, ``pthread_cancel``) are still not
+supported for Wasm Workers, even in hybrid mode.
 
 Pthreads have a "thread main" function and atexit handlers
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -186,9 +218,9 @@ In order to enable flexible synchronous execution of code on other threads, and 
 APIs for example for MEMFS filesystem and Offscreen Framebuffer (WebGL emulated from a Worker) features,
 main browser thread and each pthread have a system-backed "proxy message queue" to receive messages.
 
-This enables user code to call API functions ``emscripten_sync_run_in_main_thread*()``,
-``emscripten_sync_run_in_main_runtime_thread()``, ``emscripten_async_run_in_main_runtime_thread()``,
-``emscripten_dispatch_to_thread()``, etc. from ``emscripten/threading.h`` to perform proxied calls.
+This enables user code to call API functions, ``emscripten_sync_run_in_main_runtime_thread()``,
+``emscripten_async_run_in_main_runtime_thread()``, ``emscripten_dispatch_to_thread()``, etc. from
+``emscripten/threading.h`` to perform proxied calls.
 
 Wasm Workers do not provide this functionality. If needed, such messaging should be implemented manually
 by users via regular multithreaded synchronized programming techniques (mutexes, futexes, semaphores, etc.)
@@ -264,7 +296,7 @@ table.
     <tr><td class='cellborder'>Thread stack</td>
     <td class='cellborder'>Specify in pthread_attr_t structure.</td>
     <td class='cellborder'>Manage thread stack area explicitly with <pre>emscripten_create_wasm_worker_*_tls()</pre> functions, or
-      <br>automatically allocate stack with <pre>emscripten_malloc_wasm_worker()</pre> API.</td></tr>
+      <br>automatically allocate stack+TLS area with <pre>emscripten_malloc_wasm_worker()</pre> API.</td></tr>
 
     <tr><td class='cellborder'>Thread Local Storage (TLS)</td>
     <td class='cellborder'>Supported transparently.</td>
@@ -273,7 +305,7 @@ table.
 
     <tr><td class='cellborder'>Thread ID</td>
     <td class='cellborder'>Creating a pthread obtains its ID. Call <pre>pthread_self()</pre> to acquire ID of calling thread.</td>
-    <td class='cellborder'>Creating a Worker obtains its ID. Call <pre>emscripten_wasm_worker_self_id()</pre> acquire ID of calling thread.</td></tr>
+    <td class='cellborder'>Creating a Worker obtains its ID. Call <pre>emscripten_wasm_worker_self_id()</pre> acquire ID of calling thread.<br>In hybrid mode, <pre>pthread_self()</pre> also works.</td></tr>
 
     <tr><td class='cellborder'>High resolution timer</td>
     <td class='cellborder'>``emscripten_get_now()``</td>
@@ -285,7 +317,7 @@ table.
 
     <tr><td class='cellborder'>Futex API</td>
     <td class='cellborder'><pre>emscripten_futex_wait</pre><pre>emscripten_futex_wake</pre> in emscripten/threading.h</td>
-    <td class='cellborder'><pre>emscripten_wasm_wait_i32</pre><pre>emscripten_wasm_wait_i64</pre><pre>emscripten_wasm_notify</pre> in emscripten/wasm_workers.h</td></tr>
+    <td class='cellborder'><pre>emscripten_atomic_wait_u32</pre><pre>emscripten_atomic_wait_u64</pre><pre>emscripten_atomic_notify</pre> in emscripten/atomic.h</td></tr>
 
     <tr><td class='cellborder'>Asynchronous futex wait</td>
     <td class='cellborder'>N/A</td>
@@ -297,15 +329,15 @@ table.
 
     <tr><td class='cellborder'>Build flags</td>
     <td class='cellborder'>Compile and link with -pthread</td>
-    <td class='cellborder'>Compile and link with -sWASM_WORKERS=1</td></tr>
+    <td class='cellborder'>Compile and link with -sWASM_WORKERS</td></tr>
 
     <tr><td class='cellborder'>Preprocessor directives</td>
     <td class='cellborder'>__EMSCRIPTEN_SHARED_MEMORY__=1 and __EMSCRIPTEN_PTHREADS__=1 are active</td>
     <td class='cellborder'>__EMSCRIPTEN_SHARED_MEMORY__=1 and __EMSCRIPTEN_WASM_WORKERS__=1 are active</td></tr>
 
     <tr><td class='cellborder'>JS library directives</td>
-    <td class='cellborder'>USE_PTHREADS=1 and SHARED_MEMORY=1 are active</td>
-    <td class='cellborder'>USE_PTHREADS=1, SHARED_MEMORY=1 and WASM_WORKERS=1 are active</td></tr>
+    <td class='cellborder'>USE_PTHREADS and SHARED_MEMORY are active</td>
+    <td class='cellborder'>USE_PTHREADS, SHARED_MEMORY and WASM_WORKER are active</td></tr>
 
     <tr><td class='cellborder'>Atomics API</td>
     <td colspan=2>Supported, use any of <a href="https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html">__atomic_* API</a>, <a href="https://llvm.org/docs/Atomics.html#libcalls-sync">__sync_* API</a> or <a href="https://en.cppreference.com/w/cpp/atomic/atomic">C++11 std::atomic API</a>.</td></tr>
@@ -316,7 +348,7 @@ table.
 
     <tr><td class='cellborder'>Recursive mutex</td>
     <td class='cellborder'><pre>pthread_mutex_*</pre></td>
-    <td class='cellborder'>N/A</td></tr>
+    <td class='cellborder'>Supported in hybrid mode</td></tr>
 
     <tr><td class='cellborder'>Semaphores</td>
     <td class='cellborder'>N/A</td>
@@ -328,29 +360,106 @@ table.
 
     <tr><td class='cellborder'>Read-Write locks</td>
     <td class='cellborder'><pre>pthread_rwlock_*</pre></td>
-    <td class='cellborder'>N/A</td></tr>
+    <td class='cellborder'>Supported in hybrid mode</td></tr>
 
     <tr><td class='cellborder'>Spinlocks</td>
     <td class='cellborder'><pre>pthread_spin_*</pre></td>
     <td class='cellborder'><pre>emscripten_lock_busyspin*</pre></td></tr>
 
     <tr><td class='cellborder'>WebGL Offscreen Framebuffer</td>
-    <td class='cellborder'><pre>Supported with -sOFFSCREEN_FRAMEBUFFER=1</pre></td>
+    <td class='cellborder'><pre>Supported with -sOFFSCREEN_FRAMEBUFFER</pre></td>
     <td class='cellborder'><pre>Not supported.</pre></td></tr>
 
   </table>
+
+Wasm Workers stack size considerations
+======================================
+
+When instantiating a Wasm Worker, one has to create a memory array for the LLVM
+data stack for the created Worker. This data stack will generally consist only
+of local variables that have been "spilled" by LLVM into memory, e.g. to contain
+large arrays, structs, or other variables that are referenced by a memory
+address. This stack will not contain control flow information.
+
+Since WebAssembly does not support virtual memory, the size of the LLVM data
+stack that is defined both for Wasm Workers but also the main thread will not be
+possible to grow at runtime. So if the Worker (or the main thread) runs out of
+stack space, the program behavior will be undefined. Use the Emscripten linker
+flag -sSTACK_OVERFLOW_CHECK=2 to emit runtime stack overflow checks into the
+program code to detect these situations during development.
+
+Note that to avoid the need to perform two separate allocations, the TLS memory
+for the Wasm Worker will be located at the bottom end (low memory address) of
+the Wasm Worker stack space.
+
+Wasm Workers vs the earlier Emscripten Worker API
+=================================================
+
+Emscripten provides a second Worker API as part of the emscripten.h header. This
+Worker API predates the advent of SharedArrayBuffer, and is quite distinct from
+Wasm Workers API, just the naming of these two APIs is similar due to historical
+reasons.
+
+Both APIs allow one to spawn Web Workers from the main thread, though the
+semantics are different.
+
+With the Worker API, the user will be able to spawn a Web Worker from a custom
+URL. This URL can point to a completely separate JS file that was not compiled
+with Emscripten, to load up Workers from arbitrary URLs. With Wasm Workers, a
+custom URL is not specified: Wasm Workers will always spawn a Web Worker that
+computes in the same WebAssembly+JavaScript context as the main program.
+
+The Worker API does not integrate with SharedArrayBuffer, so interaction with
+the loaded Worker will always be asynchronous. Wasm Workers however is built on
+top of SharedArrayBuffer, and each Wasm Worker shares and computes in the same
+WebAssembly Memory address space of the main thread.
+
+Both the Worker API and Wasm Workers API provide the user with ability to
+postMessage() function calls to the Worker. In Worker API, this message posting
+is restricted to need to originate/initiate from the main thread towards the
+Worker (using the API ``emscripten_call_worker()`` and
+``emscripten_worker_respond()`` in ``<emscripten.h>``). With Wasm Workers
+however one can also postMessage() function calls to their parent (owning)
+thread.
+
+If posting function calls with the Emscripten Worker API, it is required that
+the target Worker URL points to an Emscripten compiled program (so it has the
+``Module`` structure to locate function names). Only functions that have been
+exported to the ``Module`` object are callable. With Wasm Workers, any C/C++
+function may be posted, and does not need to be exported.
+
+Use the Emscripten Worker API when:
+ - you want to easily spawn a Worker from a JS file that was not built using
+   Emscripten
+ - you want to spawn as Worker a single separate compiled program than the main
+   thread program represents, and the main thread and Worker programs do not
+   share common code
+ - you do not want to require the use of SharedArrayBuffer, or setting up
+   COOP+COEP headers
+ - you only need to communicate with the Worker asynchronously using
+   postMessage() function calls
+
+Use the Wasm Workers API when:
+ - you want to create one or more new threads that synchronously compute in the
+   same Wasm Module context
+ - you want to spawn multiple Workers from the same codebase and save memory by
+   sharing the WebAssembly Module (object code) and Memory (address space)
+   across the Workers
+ - you want to synchronously coordinate communication between threads by using
+   atomic primitives and locks
+ - your web server has been configured with the needed COOP+COEP headers to
+   enable SharedArrayBuffer capabilities on the site
 
 Limitations
 ===========
 
 The following build options are not supported at the moment with Wasm Workers:
 
-- -sSINGLE_FILE=1
-- Dynamic linking (-sLINKABLE=1, -sMAIN_MODULE=1, -sSIDE_MODULE=1)
-- -sPROXY_TO_WORKER=1
-- -sPROXY_TO_PTHREAD=1
+- -sSINGLE_FILE
+- Dynamic linking (-sLINKABLE, -sMAIN_MODULE, -sSIDE_MODULE)
+- -sPROXY_TO_PTHREAD
 
 Example Code
 ============
 
-See the directory tests/wasm_workers/ for code examples on different Wasm Workers API functionality.
+See the directory ``test/wasm_worker/`` for code examples on different Wasm Workers API functionality.

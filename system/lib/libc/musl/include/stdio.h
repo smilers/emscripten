@@ -29,7 +29,9 @@ extern "C" {
 
 #include <bits/alltypes.h>
 
-#ifdef __cplusplus
+#if __cplusplus >= 201103L && !defined(__EMSCRIPTEN__)
+#define NULL nullptr
+#elif defined(__cplusplus)
 #define NULL 0L
 #else
 #define NULL ((void*)0)
@@ -166,6 +168,13 @@ char *ctermid(char *);
 #define L_ctermid 20
 #endif
 
+#if defined(_GNU_SOURCE)
+#define RENAME_NOREPLACE (1 << 0)
+#define RENAME_EXCHANGE  (1 << 1)
+#define RENAME_WHITEOUT  (1 << 2)
+
+int renameat2(int, const char *, int, const char *, unsigned);
+#endif
 
 #if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
  || defined(_BSD_SOURCE)
@@ -213,7 +222,7 @@ typedef struct _IO_cookie_io_functions_t {
 FILE *fopencookie(void *, const char *, cookie_io_functions_t);
 #endif
 
-#if defined(_LARGEFILE64_SOURCE) || defined(_GNU_SOURCE)
+#if defined(_LARGEFILE64_SOURCE)
 #define tmpfile64 tmpfile
 #define fopen64 fopen
 #define freopen64 freopen

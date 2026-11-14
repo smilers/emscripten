@@ -1,4 +1,4 @@
-//===------------------------- cxa_handlers.cpp ---------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,7 +6,7 @@
 //
 //
 // This file implements the functionality associated with the terminate_handler,
-//   unexpected_handler, and new_handler.
+// unexpected_handler, and new_handler.
 //===----------------------------------------------------------------------===//
 
 #include <stdexcept>
@@ -17,7 +17,7 @@
 #include "cxa_handlers.h"
 #include "cxa_exception.h"
 #include "private_typeinfo.h"
-#include "include/atomic_support.h"
+#include "include/atomic_support.h" // from libc++
 
 namespace std
 {
@@ -33,11 +33,10 @@ __unexpected(unexpected_handler func)
 {
     func();
     // unexpected handler should not return
-    abort_message("unexpected_handler unexpectedly returned");
+    __abort_message("unexpected_handler unexpectedly returned");
 }
 
-__attribute__((noreturn))
-void
+[[noreturn]] void
 unexpected()
 {
     __unexpected(get_unexpected());
@@ -58,22 +57,21 @@ __terminate(terminate_handler func) noexcept
 #endif // _LIBCXXABI_NO_EXCEPTIONS
         func();
         // handler should not return
-        abort_message("terminate_handler unexpectedly returned");
+        __abort_message("terminate_handler unexpectedly returned");
 #ifndef _LIBCXXABI_NO_EXCEPTIONS
     }
     catch (...)
     {
         // handler should not throw exception
-        abort_message("terminate_handler unexpectedly threw an exception");
+        __abort_message("terminate_handler unexpectedly threw an exception");
     }
 #endif // _LIBCXXABI_NO_EXCEPTIONS
 }
 
-__attribute__((noreturn))
-void
+[[noreturn]] void
 terminate() noexcept
 {
-#if !defined(_LIBCXXABI_NO_EXCEPTIONS) && !defined(__USING_EMSCRIPTEN_EXCEPTIONS__)
+#if !defined(_LIBCXXABI_NO_EXCEPTIONS) && !defined(__EMSCRIPTEN_EXCEPTIONS__)
     // If there might be an uncaught exception
     using namespace __cxxabiv1;
     __cxa_eh_globals* globals = __cxa_get_globals_fast();
@@ -90,16 +88,6 @@ terminate() noexcept
     }
 #endif
     __terminate(get_terminate());
-}
-
-extern "C" {
-new_handler __cxa_new_handler = 0;
-}
-
-new_handler
-set_new_handler(new_handler handler) noexcept
-{
-    return __libcpp_atomic_exchange(&__cxa_new_handler, handler, _AO_Acq_Rel);
 }
 
 new_handler

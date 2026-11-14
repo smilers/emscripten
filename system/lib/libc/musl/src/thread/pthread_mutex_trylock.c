@@ -6,7 +6,7 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
 	int type = m->_m_type;
 	pthread_t self = __pthread_self();
 	int tid = self->tid;
-	volatile void *next;
+	void *next;
 
 	old = m->_m_lock;
 	own = old & 0x3fffffff;
@@ -53,10 +53,16 @@ success:
 	}
 #endif
 
+#if defined(__EMSCRIPTEN__) && !defined(NDEBUG)
+	// Under emscripten we can get here for normal mutexes too, but only in debug
+	// builds (where we track ownership purely for debug purposes).
+	if ((type&15) == PTHREAD_MUTEX_NORMAL) return 0;
+#endif
+
 	next = self->robust_list.head;
 	m->_m_next = next;
 	m->_m_prev = &self->robust_list.head;
-	if (next != &self->robust_list.head) *(volatile void *volatile *)
+	if (next != &self->robust_list.head) *(void **)
 		((char *)next - sizeof(void *)) = &m->_m_next;
 	self->robust_list.head = &m->_m_next;
 	self->robust_list.pending = 0;
@@ -71,8 +77,11 @@ success:
 
 int __pthread_mutex_trylock(pthread_mutex_t *m)
 {
+#if !defined(__EMSCRIPTEN__) || defined(NDEBUG)
+	/* XXX EMSCRIPTEN always take the slow path in debug builds so we can trap rather than deadlock */
 	if ((m->_m_type&15) == PTHREAD_MUTEX_NORMAL)
 		return a_cas(&m->_m_lock, 0, EBUSY) & EBUSY;
+#endif
 	return __pthread_mutex_trylock_owner(m);
 }
 

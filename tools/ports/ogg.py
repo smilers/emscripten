@@ -3,13 +3,11 @@
 # University of Illinois/NCSA Open Source License.  Both these licenses can be
 # found in the LICENSE file.
 
-import logging
 import os
 import shutil
-from pathlib import Path
 
-TAG = 'version_1'
-HASH = '929e8d6003c06ae09593021b83323c8f1f54532b67b8ba189f4aedce52c25dc182bac474de5392c46ad5b0dea5a24928e4ede1492d52f4dd5cd58eea9be4dba7'
+VERSION = '1.3.5'
+HASH = 'e7b5f5d469090b66dbb33634591ae6de41af3a5644c10488e59ba7428ed78912e208a2c0fbb5003ec5b7eb2a0102a2f85cecb21fa9512d790139ecc45b6d03f4'
 
 
 def needed(settings):
@@ -17,65 +15,22 @@ def needed(settings):
 
 
 def get(ports, settings, shared):
-  ports.fetch_project('ogg', 'https://github.com/emscripten-ports/ogg/archive/' + TAG + '.zip', 'Ogg-' + TAG, sha512hash=HASH)
+  ports.fetch_project('ogg', f'https://github.com/xiph/ogg/releases/download/v{VERSION}/libogg-{VERSION}.zip', sha512hash=HASH)
 
   def create(final):
-    logging.info('building port: ogg')
-    ports.clear_project_build('vorbis')
+    source_path = ports.get_dir('ogg', 'libogg-' + VERSION)
+    config_types_h = os.path.join(os.path.dirname(__file__), 'ogg/config_types.h')
+    shutil.copyfile(config_types_h, os.path.join(source_path, 'include/ogg/config_types.h'))
+    ports.install_headers(os.path.join(source_path, 'include', 'ogg'), target='ogg')
+    ports.make_pkg_config('ogg', VERSION, '-sUSE_OGG')
+    ports.build_port(os.path.join(source_path, 'src'), final, 'ogg')
 
-    source_path = os.path.join(ports.get_dir(), 'ogg', 'Ogg-' + TAG)
-    dest_path = os.path.join(ports.get_build_dir(), 'ogg')
-
-    shutil.rmtree(dest_path, ignore_errors=True)
-    shutil.copytree(source_path, dest_path)
-
-    Path(dest_path, 'include', 'ogg', 'config_types.h').write_text(config_types_h)
-
-    header_dir = os.path.join(ports.get_include_dir(), 'ogg')
-    shutil.rmtree(header_dir, ignore_errors=True)
-    shutil.copytree(os.path.join(dest_path, 'include', 'ogg'), header_dir)
-
-    ports.build_port(os.path.join(dest_path, 'src'), final)
-
-  return [shared.Cache.get_lib('libogg.a', create)]
+  return [shared.cache.get_lib('libogg.a', create)]
 
 
 def clear(ports, settings, shared):
-  shared.Cache.erase_lib('libogg.a')
-
-
-def process_args(ports):
-  return []
+  shared.cache.erase_lib('libogg.a')
 
 
 def show():
-  return 'ogg (USE_OGG=1; zlib license)'
-
-
-config_types_h = '''\
-#ifndef __CONFIG_TYPES_H__
-#define __CONFIG_TYPES_H__
-
-/* these are filled in by configure */
-#define INCLUDE_INTTYPES_H 1
-#define INCLUDE_STDINT_H 1
-#define INCLUDE_SYS_TYPES_H 1
-
-#if INCLUDE_INTTYPES_H
-#  include <inttypes.h>
-#endif
-#if INCLUDE_STDINT_H
-#  include <stdint.h>
-#endif
-#if INCLUDE_SYS_TYPES_H
-#  include <sys/types.h>
-#endif
-
-typedef int16_t ogg_int16_t;
-typedef uint16_t ogg_uint16_t;
-typedef int32_t ogg_int32_t;
-typedef uint32_t ogg_uint32_t;
-typedef int64_t ogg_int64_t;
-
-#endif
-'''
+  return 'ogg (-sUSE_OGG or --use-port=ogg; zlib license)'

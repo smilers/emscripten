@@ -4,42 +4,65 @@
  * University of Illinois/NCSA Open Source License.  Both these licenses can be
  * found in the LICENSE file.
  */
-#include <assert.h>
-#include <errno.h>
-#include <math.h>
-#include <emscripten/threading.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#include <stdio.h>
+
 #include "atomic.h"
+#include "pthread_impl.h"
 #include "threading_internal.h"
 
-extern void* _emscripten_main_thread_futex;
+#include <emscripten/threading.h>
+#include <emscripten/console.h>
 
-int _emscripten_thread_supports_atomics_wait(void);
+#include <assert.h>
+#include <math.h>
+#include <errno.h>
+#include <math.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/param.h>
 
-static int futex_wait_busy(volatile void *addr, uint32_t val, double timeout) {
-  // Atomics.wait is not available in the main browser thread, so simulate it via busy spinning.
+#ifdef __EMSCRIPTEN_PTHREADS__
+// Note: We use a weak reference here.  If it's null we know that threads are
+// not cancelable.
+weak long __cancel(void);
+#endif
+
+extern void* _Atomic _emscripten_main_thread_futex;
+
+static int futex_wait_main_browser_thread(volatile void* addr,
+                                          uint32_t val,
+                                          double timeout, bool cancelable) {
+  DBG("futex_wait_main_browser_thread");
+  // Atomics.wait is not available in the main browser thread, so simulate it
+  // via busy spinning. Only the main browser thread is allowed to call into
+  // this function. It is not thread-safe to be called from any other thread.
+  assert(emscripten_is_main_browser_thread());
+
   double now = emscripten_get_now();
   double end = now + timeout;
 
-  // Register globally which address the main thread is simulating to be
-  // waiting on. When zero, the main thread is not waiting on anything, and on
-  // nonzero, the contents of the address pointed by __emscripten_main_thread_futex
-  // tell which address the main thread is simulating its wait on.
-  // We need to be careful of recursion here: If we wait on a futex, and
-  // then call _emscripten_main_thread_process_queued_calls() below, that
-  // will call code that takes the proxying mutex - which can once more
-  // reach this code in a nested call. To avoid interference between the
-  // two (there is just a single __emscripten_main_thread_futex at a time), unmark
-  // ourselves before calling the potentially-recursive call. See below for
-  // how we handle the case of our futex being notified during the time in
-  // between when we are not set as the value of __emscripten_main_thread_futex.
+  // Register globally which address the main thread is simulating to be waiting
+  // on. When zero, the main thread is not waiting on anything, and on nonzero,
+  // the contents of the address pointed by _emscripten_main_thread_futex tell
+  // which address the main thread is simulating its wait on.  We need to be
+  // careful of recursion here: If we wait on a futex, and then call
+  // _emscripten_yield() below, that will call code that takes the proxying
+  // mutex - which can once more reach this code in a nested call. To avoid
+  // interference between the two (there is just a single
+  // _emscripten_main_thread_futex at a time), unmark ourselves before calling
+  // the potentially-recursive call. See below for how we handle the case of our
+  // futex being notified during the time in between when we are not set as the
+  // value of _emscripten_main_thread_futex.
   void* last_addr = a_cas_p(&_emscripten_main_thread_futex, 0, (void*)addr);
   // We must not have already been waiting.
   assert(last_addr == 0);
 
   while (1) {
+#ifdef __EMSCRIPTEN_PTHREADS__
+    if (cancelable && __pthread_self()->cancel) {
+      return __cancel();
+    }
+#endif
     // Check for a timeout.
     now = emscripten_get_now();
     if (now > end) {
@@ -62,28 +85,28 @@ static int futex_wait_busy(volatile void *addr, uint32_t val, double timeout) {
       // We were told to stop waiting, so stop.
       break;
     }
-    emscripten_main_thread_process_queued_calls();
+    _emscripten_yield(now);
 
     // Check the value, as if we were starting the futex all over again.
     // This handles the following case:
     //
     //  * wait on futex A
-    //  * recurse into emscripten_main_thread_process_queued_calls(),
-    //    which waits on futex B. that sets the __emscripten_main_thread_futex address to
-    //    futex B, and there is no longer any mention of futex A.
-    //  * a worker is done with futex A. it checks __emscripten_main_thread_futex but does
-    //    not see A, so it does nothing special for the main thread.
+    //  * recurse into _emscripten_yield(),
+    //    which waits on futex B. that sets the _emscripten_main_thread_futex
+    //    address to futex B, and there is no longer any mention of futex A.
+    //  * a worker is done with futex A. it checks _emscripten_main_thread_futex
+    //    but does not see A, so it does nothing special for the main thread.
     //  * a worker is done with futex B. it flips mainThreadMutex from B
     //    to 0, ending the wait on futex B.
-    //  * we return to the wait on futex A. __emscripten_main_thread_futex is 0, but that
-    //    is because of futex B being done - we can't tell from
-    //    __emscripten_main_thread_futex whether A is done or not. therefore, check the
-    //    memory value of the futex.
+    //  * we return to the wait on futex A. _emscripten_main_thread_futex is 0,
+    //    but that is because of futex B being done - we can't tell from
+    //    _emscripten_main_thread_futex whether A is done or not. therefore,
+    //    check the memory value of the futex.
     //
     // That case motivates the design here. Given that, checking the memory
     // address is also necessary for other reasons: we unset and re-set our
-    // address in __emscripten_main_thread_futex around calls to
-    // emscripten_main_thread_process_queued_calls(), and a worker could
+    // address in _emscripten_main_thread_futex around calls to
+    // _emscripten_yield(), and a worker could
     // attempt to wake us up right before/after such times.
     //
     // Note that checking the memory value of the futex is valid to do: we
@@ -92,13 +115,13 @@ static int futex_wait_busy(volatile void *addr, uint32_t val, double timeout) {
     // later time when there is no need to block. The only "odd" thing is
     // that we may have caused side effects in that "delay" time. But the
     // only side effects we can have are to call
-    // emscripten_main_thread_process_queued_calls(). That is always ok to
+    // _emscripten_yield(). That is always ok to
     // do on the main thread (it's why it is ok for us to call it in the
     // middle of this function, and elsewhere). So if we check the value
     // here and return, it's the same is if what happened on the main thread
-    // was the same as calling emscripten_main_thread_process_queued_calls()
+    // was the same as calling _emscripten_yield()
     // a few times before calling emscripten_futex_wait().
-    if (__c11_atomic_load((_Atomic uintptr_t*)addr, __ATOMIC_SEQ_CST) != val) {
+    if (atomic_load((_Atomic uint32_t*)addr) != val) {
       return -EWOULDBLOCK;
     }
 
@@ -109,63 +132,101 @@ static int futex_wait_busy(volatile void *addr, uint32_t val, double timeout) {
   return 0;
 }
 
-static _Atomic bool thread_crashed = false;
-
-void _emscripten_thread_crashed() {
-  thread_crashed = true;
+static double dummy() {
+  return INFINITY;
 }
 
-int emscripten_futex_wait(volatile void *addr, uint32_t val, double max_wait_ms) {
+weak_alias(dummy, _emscripten_next_timer);
+
+static int _do_futex_wait(volatile void *addr, uint32_t val, double max_wait_ms) {
   if ((((intptr_t)addr)&3) != 0) {
     return -EINVAL;
   }
 
-  if (emscripten_is_main_runtime_thread()) {
-    // When a secondary thread crashes, we need to be able to interrupt the main
-    // thread even if it's in a blocking/looping on a mutex.  We want to avoid
-    // using the normal proxying mechanism to send this message since it can
-    // allocate (or otherwise itself crash) so use a low level atomic primitive
-    // for this signal.
-    if (thread_crashed) {
-      // Return the event loop so we can handle the message from the crashed
-      // thread.
-      emscripten_unwind_to_js_event_loop();
-    }
+  int ret;
 
-    // Assist other threads by executing proxied operations that are effectively singlethreaded.
-    emscripten_main_thread_process_queued_calls();
+#ifdef __EMSCRIPTEN_PTHREADS__
+  pthread_t self = __pthread_self();
+  bool cancelable = __cancel && self->canceldisable != PTHREAD_CANCEL_DISABLE;
+#else
+  bool cancelable = false;
+#endif
+
+  DBG("emscripten_futex_wait ms=%f", max_wait_ms);
+
+  // For the main browser thread and audio worklets we can't use
+  // __builtin_wasm_memory_atomic_wait32 so we have busy wait instead.
+  if (!_emscripten_thread_supports_atomics_wait()) {
+    return futex_wait_main_browser_thread(addr, val, max_wait_ms, cancelable);
   }
 
-  int ret;
-  emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_RUNNING, EM_THREAD_STATUS_WAITFUTEX);
-
-  // For threads that cannot block (i.e. the main browser thread) we can't use
-  // __builtin_wasm_memory_atomic_wait32 so we call out the JS function that
-  // will busy wait.
-  if (!_emscripten_thread_supports_atomics_wait()) {
-    ret = futex_wait_busy(addr, val, max_wait_ms);
-    emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_WAITFUTEX, EM_THREAD_STATUS_RUNNING);
-    return ret;
+  bool timeout_adjusted = false;
+  if (emscripten_is_main_runtime_thread()) {
+    double next_timer = _emscripten_next_timer();
+    if (next_timer < max_wait_ms) {
+      max_wait_ms = fmax(0, next_timer);
+      timeout_adjusted = true;
+    }
   }
 
   // -1 (or any negative number) means wait indefinitely.
-  int64_t max_wait_ns = -1;
+  int64_t max_wait_ns = ATOMICS_WAIT_DURATION_INFINITE;
   if (max_wait_ms != INFINITY) {
-    max_wait_ns = (int64_t)(max_wait_ms*1000*1000);
+    max_wait_ns = (int64_t)(max_wait_ms * 1e6);
   }
-  ret = __builtin_wasm_memory_atomic_wait32((int*)addr, val, max_wait_ns);
-  emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_WAITFUTEX, EM_THREAD_STATUS_RUNNING);
+#ifdef __EMSCRIPTEN_PTHREADS__
+  uintptr_t expected_null = 0;
+  if (atomic_compare_exchange_strong(&self->wait_addr, &expected_null, (uintptr_t)addr)) {
+    DBG("emscripten_futex_wait atomic.wait ns=%lld", max_wait_ns);
+    ret = __builtin_wasm_memory_atomic_wait32((int*)addr, val, max_wait_ns);
+  } else {
+    DBG("emscripten_futex_wait skipping atomic.wait due to NOTIFY_BIT");
+    // CAS failed, NOTIFY_BIT must have been set.  In this case we don't
+    // actually wait at all.  Instead we behave as if we spuriously woke up
+    // right away.
+    assert(expected_null & NOTIFY_BIT);
+    ret = ATOMICS_WAIT_OK;
+  }
 
-  // memory.atomic.wait32 returns:
-  //   0 => "ok", woken by another agent.
-  //   1 => "not-equal", loaded value != expected value
-  //   2 => "timed-out", the timeout expired
-  if (ret == 1) {
+  // Clear the wait_addr
+  self->wait_addr = 0;
+
+  // Here we are mimicking the behaviour of musl's __syscall_cp_c which wraps
+  // the linux futex syscall.
+  if (self->cancel && cancelable) {
+    return __cancel();
+  }
+
+  DBG("emscripten_futex_wait done cancelable=%d cancel=%d", cancelable, self->cancel);
+#else // __EMSCRIPTEN_PTHREADS__
+  ret = __builtin_wasm_memory_atomic_wait32((int*)addr, val, max_wait_ns);
+#endif // __EMSCRIPTEN_PTHREADS__
+
+  // Pass 0 here, which means we don't have access to the current time in this
+  // function.  This tells _emscripten_yield to call emscripten_get_now if (and
+  // only if) it needs to know the time.
+  _emscripten_yield(0);
+
+  if (ret == ATOMICS_WAIT_NOT_EQUAL) {
     return -EWOULDBLOCK;
   }
-  if (ret == 2) {
+  if (ret == ATOMICS_WAIT_TIMED_OUT) {
+    if (timeout_adjusted) {
+      // If the wait duration was shortened to service the next timer (rather
+      // than the caller's actual timeout expiring), treat this as a spurious
+      // wakeup rather.
+      return 0;
+    }
     return -ETIMEDOUT;
   }
-  assert(ret == 0);
+  assert(ret == ATOMICS_WAIT_OK);
   return 0;
+}
+
+
+int emscripten_futex_wait(volatile void *addr, uint32_t val, double max_wait_ms) {
+  emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_RUNNING, EM_THREAD_STATUS_WAITFUTEX);
+  int ret = _do_futex_wait(addr, val, max_wait_ms);
+  emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS_WAITFUTEX, EM_THREAD_STATUS_RUNNING);
+  return ret;
 }

@@ -40,6 +40,7 @@ extern "C" {
 
 #define MAP_HUGE_SHIFT 26
 #define MAP_HUGE_MASK  0x3f
+#define MAP_HUGE_16KB  (14 << 26)
 #define MAP_HUGE_64KB  (16 << 26)
 #define MAP_HUGE_512KB (19 << 26)
 #define MAP_HUGE_1MB   (20 << 26)
@@ -94,6 +95,10 @@ extern "C" {
 #define MADV_KEEPONFORK  19
 #define MADV_COLD        20
 #define MADV_PAGEOUT     21
+#define MADV_POPULATE_READ 22
+#define MADV_POPULATE_WRITE 23
+#define MADV_DONTNEED_LOCKED 24
+#define MADV_COLLAPSE    25
 #define MADV_HWPOISON    100
 #define MADV_SOFT_OFFLINE 101
 #endif
@@ -140,7 +145,7 @@ int mincore (void *, size_t, unsigned char *);
 int shm_open (const char *, int, mode_t);
 int shm_unlink (const char *);
 
-#if defined(_LARGEFILE64_SOURCE) || defined(_GNU_SOURCE)
+#if defined(_LARGEFILE64_SOURCE)
 #define mmap64 mmap
 #define off64_t off_t
 #endif

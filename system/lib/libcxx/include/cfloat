@@ -1,5 +1,5 @@
 // -*- C++ -*-
-//===--------------------------- cfloat -----------------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -69,11 +69,22 @@ Macros:
     LDBL_TRUE_MIN       // C11
 */
 
-#include <__config>
-#include <float.h>
+#if __cplusplus < 201103L && defined(_LIBCPP_USE_FROZEN_CXX03_HEADERS)
+#  include <__cxx03/cfloat>
+#else
+#  include <__config>
 
-#if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
-#pragma GCC system_header
-#endif
+// <float.h> is not provided by libc++
+#  if __has_include(<float.h>)
+#    include <float.h>
+#    ifdef _LIBCPP_FLOAT_H
+#      error "If libc++ starts defining <float.h>, the __has_include check should move to libc++'s <float.h>"
+#    endif
+#  endif
+
+#  if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
+#    pragma GCC system_header
+#  endif
+#endif // __cplusplus < 201103L && defined(_LIBCPP_USE_FROZEN_CXX03_HEADERS)
 
 #endif // _LIBCPP_CFLOAT

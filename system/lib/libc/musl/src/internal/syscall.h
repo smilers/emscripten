@@ -20,18 +20,12 @@
 
 #ifndef __scc
 #define __scc(X) ((long) (X))
+#endif
 typedef long syscall_arg_t;
-#endif
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 hidden long __syscall_ret(unsigned long),
 	__syscall_cp(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t,
 	             syscall_arg_t, syscall_arg_t, syscall_arg_t);
-#ifdef __cplusplus
-}
-#endif
 
 #ifndef __EMSCRIPTEN__
 #define __syscall1(n,a) __syscall1(n,__scc(a))
@@ -43,12 +37,12 @@ hidden long __syscall_ret(unsigned long),
 #else // __EMSCRIPTEN__
 #define __syscall_emscripten(n, ...) n(__VA_ARGS__)
 #define __syscall_emscripten0(n) __syscall_emscripten(n)
-#define __syscall_emscripten1(n,a) __syscall_emscripten(n,__scc(a))
-#define __syscall_emscripten2(n,a,b) __syscall_emscripten(n,__scc(a),__scc(b))
-#define __syscall_emscripten3(n,a,b,c) __syscall_emscripten(n,__scc(a),__scc(b),__scc(c))
-#define __syscall_emscripten4(n,a,b,c,d) __syscall_emscripten(n,__scc(a),__scc(b),__scc(c),__scc(d))
-#define __syscall_emscripten5(n,a,b,c,d,e) __syscall_emscripten(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e))
-#define __syscall_emscripten6(n,a,b,c,d,e,f) __syscall_emscripten(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e),__scc(f))
+#define __syscall_emscripten1(n,a) __syscall_emscripten(n,a)
+#define __syscall_emscripten2(n,a,b) __syscall_emscripten(n,a,b)
+#define __syscall_emscripten3(n,a,b,c) __syscall_emscripten(n,a,b,c)
+#define __syscall_emscripten4(n,a,b,c,d) __syscall_emscripten(n,a,b,c,d)
+#define __syscall_emscripten5(n,a,b,c,d,e) __syscall_emscripten(n,a,b,c,d,e)
+#define __syscall_emscripten6(n,a,b,c,d,e,f) __syscall_emscripten(n,a,b,c,d,e,f)
 #endif // __EMSCRIPTEN__
 
 #define __SYSCALL_NARGS_X(a,b,c,d,e,f,g,h,n,...) n
@@ -88,7 +82,6 @@ hidden long __syscall_ret(unsigned long),
 #define __socketcall(nm,a,b,c,d,e,f) __syscall(SYS_##nm, a, b, c, d, e, f)
 #define __socketcall_cp(nm,a,b,c,d,e,f) __syscall_cp(SYS_##nm, a, b, c, d, e, f)
 #else
-static inline long __alt_socketcall(int sys, int sock, int cp, long a, long b, long c, long d, long e, long f)
 {
 	long r;
 	if (cp) r = __syscall_cp(sys, a, b, c, d, e, f);
@@ -101,9 +94,9 @@ static inline long __alt_socketcall(int sys, int sock, int cp, long a, long b, l
 	return r;
 }
 #define __socketcall(nm, a, b, c, d, e, f) __alt_socketcall(SYS_##nm, __SC_##nm, 0, \
-	(long)(a), (long)(b), (long)(c), (long)(d), (long)(e), (long)(f))
+	__scc(a), __scc(b), __scc(c), __scc(d), __scc(e), __scc(f))
 #define __socketcall_cp(nm, a, b, c, d, e, f) __alt_socketcall(SYS_##nm, __SC_##nm, 1, \
-	(long)(a), (long)(b), (long)(c), (long)(d), (long)(e), (long)(f))
+	__scc(a), __scc(b), __scc(c), __scc(d), __scc(e), __scc(f))
 #endif
 
 /* fixup legacy 16-bit junk */
@@ -128,7 +121,6 @@ static inline long __alt_socketcall(int sys, int sock, int cp, long a, long b, l
 #undef SYS_setgid
 #undef SYS_setfsuid
 #undef SYS_setfsgid
-#define SYS_lchown SYS_lchown32
 #define SYS_getuid SYS_getuid32
 #define SYS_getgid SYS_getgid32
 #define SYS_geteuid SYS_geteuid32
@@ -142,7 +134,6 @@ static inline long __alt_socketcall(int sys, int sock, int cp, long a, long b, l
 #define SYS_getresuid SYS_getresuid32
 #define SYS_setresgid SYS_setresgid32
 #define SYS_getresgid SYS_getresgid32
-#define SYS_chown SYS_chown32
 #define SYS_setuid SYS_setuid32
 #define SYS_setgid SYS_setgid32
 #define SYS_setfsuid SYS_setfsuid32
@@ -232,43 +223,43 @@ static inline long __alt_socketcall(int sys, int sock, int cp, long a, long b, l
 #define SYS_sendfile SYS_sendfile64
 #endif
 
-#ifndef SYS_timer_settime
+#ifdef SYS_timer_settime32
 #define SYS_timer_settime SYS_timer_settime32
 #endif
 
-#ifndef SYS_timer_gettime
+#ifdef SYS_timer_gettime32
 #define SYS_timer_gettime SYS_timer_gettime32
 #endif
 
-#ifndef SYS_timerfd_settime
+#ifdef SYS_timerfd_settime32
 #define SYS_timerfd_settime SYS_timerfd_settime32
 #endif
 
-#ifndef SYS_timerfd_gettime
+#ifdef SYS_timerfd_gettime32
 #define SYS_timerfd_gettime SYS_timerfd_gettime32
 #endif
 
-#ifndef SYS_clock_settime
+#ifdef SYS_clock_settime32
 #define SYS_clock_settime SYS_clock_settime32
 #endif
 
-#ifndef SYS_clock_gettime
+#ifdef SYS_clock_gettime32
 #define SYS_clock_gettime SYS_clock_gettime32
 #endif
 
-#ifndef SYS_clock_getres
+#ifdef SYS_clock_getres_time32
 #define SYS_clock_getres SYS_clock_getres_time32
 #endif
 
-#ifndef SYS_clock_nanosleep
+#ifdef SYS_clock_nanosleep_time32
 #define SYS_clock_nanosleep SYS_clock_nanosleep_time32
 #endif
 
-#ifndef SYS_gettimeofday
+#ifdef SYS_gettimeofday_time32
 #define SYS_gettimeofday SYS_gettimeofday_time32
 #endif
 
-#ifndef SYS_settimeofday
+#ifdef SYS_settimeofday_time32
 #define SYS_settimeofday SYS_settimeofday_time32
 #endif
 
@@ -417,10 +408,10 @@ static inline long __alt_socketcall(int sys, int sock, int cp, long a, long b, l
 #define __sys_open_cp3(x,pn,fl,mo) __syscall_cp4(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE, mo)
 #endif
 #else // __EMSCRIPTEN__
-#define __sys_open2(x,pn,fl) __syscall_openat(__scc(AT_FDCWD), __scc(pn), __scc((fl)|O_LARGEFILE))
-#define __sys_open3(x,pn,fl,mo) __syscall_openat(__scc(AT_FDCWD), __scc(pn), __scc((fl)|O_LARGEFILE), __scc(mo))
-#define __sys_open_cp2(x,pn,fl) __syscall_openat(__scc(AT_FDCWD), __scc(pn), __scc((fl)|O_LARGEFILE))
-#define __sys_open_cp3(x,pn,fl,mo) __syscall_openat(__scc(AT_FDCWD), __scc(pn), __scc((fl)|O_LARGEFILE), __scc(mo))
+#define __sys_open2(x,pn,fl) __syscall_openat(AT_FDCWD, pn, (fl)|O_LARGEFILE)
+#define __sys_open3(x,pn,fl,mo) __syscall_openat(AT_FDCWD, pn, (fl)|O_LARGEFILE, mo)
+#define __sys_open_cp2(x,pn,fl) __syscall_openat(AT_FDCWD, pn, (fl)|O_LARGEFILE)
+#define __sys_open_cp3(x,pn,fl,mo) __syscall_openat(AT_FDCWD, pn, (fl)|O_LARGEFILE, mo)
 #endif
 
 #define __sys_open(...) __SYSCALL_DISP(__sys_open,,__VA_ARGS__)
@@ -429,11 +420,36 @@ static inline long __alt_socketcall(int sys, int sock, int cp, long a, long b, l
 #define __sys_open_cp(...) __SYSCALL_DISP(__sys_open_cp,,__VA_ARGS__)
 #define sys_open_cp(...) __syscall_ret(__sys_open_cp(__VA_ARGS__))
 
-#ifdef __cplusplus
-hidden void __procfdname(char __buf[], unsigned);
+#ifdef SYS_pause
+#define __sys_pause() __syscall(SYS_pause)
+#define __sys_pause_cp() __syscall_cp(SYS_pause)
+#elif defined(__EMSCRIPTEN__)
+/* Note: When the sigmask argument is NULL, ppoll() differs from poll() only
+ * in the precision of the timeout argument.  For poll -1 means block forever
+ * as opposed to ppoll which uses NULL/0. */
+#define __sys_pause() __syscall(SYS_poll, 0, 0, -1)
+#define __sys_pause_cp() __syscall_cp(SYS_poll, 0, 0, -1)
 #else
-hidden void __procfdname(char __buf[static 15+3*sizeof(int)], unsigned);
+#define __sys_pause() __syscall(SYS_ppoll, 0, 0, 0, 0)
+#define __sys_pause_cp() __syscall_cp(SYS_ppoll, 0, 0, 0, 0)
 #endif
+
+#define sys_pause() __syscall_ret(__sys_pause())
+#define sys_pause_cp() __syscall_ret(__sys_pause_cp())
+
+#ifdef SYS_wait4
+#define __sys_wait4(a,b,c,d) __syscall(SYS_wait4,a,b,c,d)
+#define __sys_wait4_cp(a,b,c,d) __syscall_cp(SYS_wait4,a,b,c,d)
+#else
+hidden long __emulate_wait4(int, int *, int, void *, int);
+#define __sys_wait4(a,b,c,d) __emulate_wait4(a,b,c,d,0)
+#define __sys_wait4_cp(a,b,c,d) __emulate_wait4(a,b,c,d,1)
+#endif
+
+#define sys_wait4(a,b,c,d) __syscall_ret(__sys_wait4(a,b,c,d))
+#define sys_wait4_cp(a,b,c,d) __syscall_ret(__sys_wait4_cp(a,b,c,d))
+
+hidden void __procfdname(char __buf[static 15+3*sizeof(int)], unsigned);
 
 hidden void *__vdsosym(const char *, const char *);
 

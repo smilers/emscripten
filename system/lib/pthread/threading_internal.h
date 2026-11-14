@@ -7,70 +7,21 @@
 
 #pragma once
 
-typedef union em_variant_val
-{
-  int i;
-  int64_t i64;
-  float f;
-  double d;
-  void *vp;
-  char *cp;
-} em_variant_val;
+#include <emscripten/proxying.h>
 
-// Proxied C/C++ functions support at most this many arguments. Dispatch is
-// static/strongly typed by signature.
-#define EM_QUEUED_CALL_MAX_ARGS 11
-typedef struct em_queued_call
-{
-  int functionEnum;
-  void *functionPtr;
-  _Atomic uint32_t operationDone;
-  em_variant_val args[EM_QUEUED_JS_CALL_MAX_ARGS];
-  em_variant_val returnValue;
+#include <inttypes.h>
+#include <pthread.h>
+#include <stdbool.h>
 
-  // An optional pointer to a secondary data block that should be free()d when
-  // this queued call is freed.
-  void *satelliteData;
+// Defined THREADING_DEBUG here (or in the build system) to enabled verbose
+// logging using emscripten_dbgf.
+// #define THREADING_DEBUG
 
-  // If true, the caller has "detached" itself from this call object and the
-  // Emscripten main runtime thread should free up this em_queued_call object
-  // after it has been executed. If false, the caller is in control of the
-  // memory.
-  int calleeDelete;
-} em_queued_call;
-
-typedef void (*em_func_v)(void);
-typedef void (*em_func_vi)(int);
-typedef void (*em_func_vf)(float);
-typedef void (*em_func_vii)(int, int);
-typedef void (*em_func_vif)(int, float);
-typedef void (*em_func_vff)(float, float);
-typedef void (*em_func_viii)(int, int, int);
-typedef void (*em_func_viif)(int, int, float);
-typedef void (*em_func_viff)(int, float, float);
-typedef void (*em_func_vfff)(float, float, float);
-typedef void (*em_func_viiii)(int, int, int, int);
-typedef void (*em_func_viifi)(int, int, float, int);
-typedef void (*em_func_vifff)(int, float, float, float);
-typedef void (*em_func_vffff)(float, float, float, float);
-typedef void (*em_func_viiiii)(int, int, int, int, int);
-typedef void (*em_func_viffff)(int, float, float, float, float);
-typedef void (*em_func_viiiiii)(int, int, int, int, int, int);
-typedef void (*em_func_viiiiiii)(int, int, int, int, int, int, int);
-typedef void (*em_func_viiiiiiii)(int, int, int, int, int, int, int, int);
-typedef void (*em_func_viiiiiiiii)(int, int, int, int, int, int, int, int, int);
-typedef void (*em_func_viiiiiiiiii)(int, int, int, int, int, int, int, int, int, int);
-typedef void (*em_func_viiiiiiiiiii)(int, int, int, int, int, int, int, int, int, int, int);
-typedef int (*em_func_i)(void);
-typedef int (*em_func_ii)(int);
-typedef int (*em_func_iii)(int, int);
-typedef int (*em_func_iiii)(int, int, int);
-typedef int (*em_func_iiiii)(int, int, int, int);
-typedef int (*em_func_iiiiii)(int, int, int, int, int);
-typedef int (*em_func_iiiiiii)(int, int, int, int, int, int);
-typedef int (*em_func_iiiiiiii)(int, int, int, int, int, int, int);
-typedef int (*em_func_iiiiiiiii)(int, int, int, int, int, int, int, int);
-typedef int (*em_func_iiiiiiiiii)(int, int, int, int, int, int, int, int, int);
+#ifdef THREADING_DEBUG
+#define DBG(format, ...) emscripten_dbgf(format, ##__VA_ARGS__)
+#else
+#define DBG(format, ...)
+#endif
 
 #define EM_THREAD_NAME_MAX 32
 
@@ -96,10 +47,45 @@ typedef struct thread_profiler_block {
   char name[EM_THREAD_NAME_MAX];
 } thread_profiler_block;
 
-void __emscripten_init_main_thread_js(void* tb);
-void _emscripten_thread_profiler_enable();
+// Called whenever a thread performs a blocking action (or calls sched_yield).
+// This function takes care of running the event queue and other housekeeping
+// tasks.
+//
+// If the caller already knows the current time it can pass it via the now
+// argument.  This can save _emscripten_check_timers from needing to call out to
+// JS to get the current time.  Passing 0 means that caller doesn't know the
+// current time.
+void _emscripten_yield(double now);
 
-#ifdef NDEBUG
+void _emscripten_init_main_thread_js(void* tb);
+void _emscripten_thread_profiler_enable();
+void _emscripten_thread_cleanup(pthread_t thread);
+
+hidden void* _emscripten_tls_init(void);
+hidden void _emscripten_tls_free(void);
+
+// Marks the given thread as strongly referenced. This is used to prevent the
+// Node.js application from exiting as long as there are strongly referenced
+// threads still running. Normally you don't need to call this function, and
+// the pthread behaviour will match native in that background threads won't
+// keep runtime alive, but waiting for them via e.g. pthread_join will. 
+// However, this is useful for features like PROXY_TO_PTHREAD where we want to
+// keep running as long as the detached pthread is.
+void _emscripten_thread_set_strongref(pthread_t thread);
+
+// Checks certain structural invariants.  This allows us to detect when
+// already-freed threads are used in some APIs.  Technically this is undefined
+// behaviour, but we have a couple of places where we add these checks so that
+// we can pass more of the posixtest suite than vanilla musl.
+int _emscripten_thread_is_valid(pthread_t thread);
+
+void _emscripten_thread_exit_joinable(pthread_t thread);
+void _emscripten_thread_free_tls(void);
+void _emscripten_thread_exit(void* result);
+void _emscripten_process_dlopen_queue(void);
+extern em_proxying_queue* _Atomic _dlopen_proxying_queue;
+
+#if !defined(__EMSCRIPTEN_PTHREADS__) || defined(NDEBUG)
 #define emscripten_set_current_thread_status(newStatus)
 #define emscripten_conditional_set_current_thread_status(expectedStatus, newStatus)
 #else
@@ -120,3 +106,40 @@ void emscripten_set_current_thread_status(EM_THREAD_STATUS newStatus);
 // this is a no-op.
 void emscripten_conditional_set_current_thread_status(EM_THREAD_STATUS expectedStatus, EM_THREAD_STATUS newStatus);
 #endif
+
+int __pthread_kill_js(pthread_t t, int sig);
+int __pthread_create_js(pthread_t thread, const pthread_attr_t *attr, void *(*start_routine) (void *), void *arg);
+void __set_thread_state(pthread_t ptr, int is_main, int is_runtime, int can_block);
+
+double _emscripten_receive_on_main_thread_js(int funcIndex, void* emAsmAddr, pthread_t callingThread, int numCallArgs, double* args, void* ctx, void* ctxArgs);
+
+void _emscripten_run_js_on_main_thread_done(void* ctx, void* arg, double result, bool fulfilled);
+
+// Return non-zero if the calling thread supports Atomic.wait (For example
+// if called from the main browser thread, this function will return zero
+// since blocking is not allowed there).
+int _emscripten_thread_supports_atomics_wait(void);
+
+pid_t _emscripten_get_next_tid();
+
+// Initialize pthread data, at start of memory region pointed to `base`.
+// `size` is an in/out parameter representing the size of the `base` region
+// on input, and the size of new/adjusted region on output.
+// Return a new/adjusted memory base to be used to stack/tls data.
+void* _emscripten_init_pthread(void *base, size_t* size, pid_t tid);
+
+// Wake the target thread in case it is blocked in emscripten_futex_wait.
+// Note: If threads directly use lower level APIs such
+// __builtin_wasm_memory_atomic_waitXX then they will not be woken by
+// this method.
+void _emscripten_thread_notify(pthread_t thread);
+
+// Internal, promise-returning API used to implement
+// emscripten_atomic_wait_suspending.
+intptr_t _emscripten_atomic_wait_promise(volatile void *addr,
+                                         uint32_t value,
+                                         double maxWaitMilliseconds);
+
+// Internal function used in wasm worker builds (included here solely for
+// gen_sig_info.py).
+void __do_set_thread_state(void);

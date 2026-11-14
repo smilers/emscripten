@@ -10,28 +10,23 @@
 #ifndef _LIBCPP___ALGORITHM_NONE_OF_H
 #define _LIBCPP___ALGORITHM_NONE_OF_H
 
+#include <__algorithm/any_of.h>
 #include <__config>
+#include <__functional/identity.h>
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
-#pragma GCC system_header
+#  pragma GCC system_header
 #endif
-
-_LIBCPP_PUSH_MACROS
-#include <__undef_macros>
 
 _LIBCPP_BEGIN_NAMESPACE_STD
 
 template <class _InputIterator, class _Predicate>
-_LIBCPP_NODISCARD_EXT inline _LIBCPP_INLINE_VISIBILITY _LIBCPP_CONSTEXPR_AFTER_CXX17 bool
+[[__nodiscard__]] inline _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 bool
 none_of(_InputIterator __first, _InputIterator __last, _Predicate __pred) {
-  for (; __first != __last; ++__first)
-    if (__pred(*__first))
-      return false;
-  return true;
+  __identity __proj;
+  return !std::__any_of(__first, __last, __pred, __proj);
 }
 
 _LIBCPP_END_NAMESPACE_STD
-
-_LIBCPP_POP_MACROS
 
 #endif // _LIBCPP___ALGORITHM_NONE_OF_H

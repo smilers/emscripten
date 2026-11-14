@@ -46,11 +46,31 @@ complete at the moment, it is likely that you will run into problems out of the
 box and need to adapt the code to work within the limitations that this
 emulation provides.
 
-This is the default build mode for Emscripten. Use the linker flag ``-s
-WEBSOCKET_URL`` or ``Module['websocket']['url']`` to specify the WebSocket URL
+This is the default build mode for Emscripten. Use the linker flag
+``-sWEBSOCKET_URL`` or ``Module['websocket']['url']`` to specify the WebSocket URL
 to connect to, and the linker flag ``-sWEBSOCKET_SUBPROTOCOL`` or
 ``Module['websocket']['subprotocol']`` to control the connection type
 (``'binary'`` or ``'text'``).
+
+POSIX Sockets on Node.js
+========================
+
+When targeting Node.js, the linker flag ``-sNODERAWSOCKETS`` backs the POSIX
+sockets API with real host TCP, UDP and ``AF_UNIX`` stream sockets (see
+:ref:`NODERAWSOCKETS`).
+
+Non-blocking sockets (``SOCK_NONBLOCK``, ``fcntl(F_SETFL, O_NONBLOCK)`` or
+``ioctl(FIONBIO)``) behave as on Linux.
+
+Blocking sockets cannot actually block. An operation on a blocking socket that
+would need to wait (``accept()``, ``recv()``/``read()``) fails with ``EAGAIN``
+instead, a blocking ``connect()`` returns ``0`` before the connection has
+completed, and a blocking ``send()`` never waits: it buffers without limit
+(only a non-blocking socket is bounded by the write buffer's high-water mark
+and reports ``EAGAIN``). Builds with ``ASSERTIONS`` print a warning the first
+time a blocking socket returns ``EAGAIN``. Applications should use non-blocking
+sockets together with ``poll()`` or ``epoll``, which can wait when called from
+a pthread, or when using :ref:`ASYNCIFY`.
 
 Full POSIX Sockets over WebSocket Proxy Server
 ==============================================
@@ -73,12 +93,12 @@ The following POSIX sockets functions are currently not proxied (and will not wo
  - ``poll()``, ``close()`` (use ``shutdown()`` instead), ``select()``
 
 To use POSIX sockets proxying, link the application with flags ``-lwebsocket.js
--sPROXY_POSIX_SOCKETS=1 -sUSE_PTHREADS=1 -sPROXY_TO_PTHREAD=1``. That is,
+-sPROXY_POSIX_SOCKETS -pthread -sPROXY_TO_PTHREAD``. That is,
 POSIX sockets proxying builds on top of the Emscripten WebSockets library, and
 requires multithreading and proxying the application ``main()`` to a pthread.
 
 For an example of how the POSIX Sockets proxy server works in an Emscripten
-client program, see the file ``tests/websocket/tcp_echo_client.cpp``.
+client program, see the file ``test/websocket/tcp_echo_client.c``.
 
 XmlHttpRequests and Fetch API
 =============================
@@ -96,3 +116,9 @@ Direct UDP communication is not available in browsers, but as a close
 alternative, the WebRTC specification provides a mechanism to perform UDP-like
 communication with WebRTC Data Channels. Currently Emscripten does not provide a
 C/C++ API for interacting with WebRTC.
+
+WebTransport and QUIC
+=====================
+
+WebTransport may be used to send UDP like datagrams over QUIC.
+Currently Emscripten does not provide a C/C++ API for interacting with WebTransport.

@@ -32,8 +32,10 @@ var scriptArgs = [];
  * @suppress {duplicate}
  */
 var quit = function(status) {};
+
 /**
- * @return {number}
- * @suppress {duplicate}
+ * @param {string} cmd
+ * @param {Array.<string>=} args
+ * @return {string}
  */
-var dateNow = function() {};
+os.system = function (cmd, args) {};

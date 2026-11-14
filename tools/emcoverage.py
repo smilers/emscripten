@@ -4,8 +4,7 @@
 # University of Illinois/NCSA Open Source License.  Both these licenses can be
 # found in the LICENSE file.
 
-"""
-This is the Emscripten coverage tool.
+"""Emscripten coverage tool.
 
 Usage: emcoverage.py <help|reset|report|html|xml|COMMAND> ...
 
@@ -17,7 +16,7 @@ Special commands:
   - xml:    generate XML coverage report in ./coverage.xml
 
 Otherwise, you can run any python script or Emscripten command, for example:
-  - emcoverage.py ./tests/runner.py core0
+  - emcoverage.py ./test/runner.py core0
   - emcoverage.py emcc file1.c file2.c
 
 Running a command under emcoverage.py will collect the code coverage
@@ -29,6 +28,7 @@ To display the gathered coverage information, use one of the three subcommands:
 report, html, xml.
 """
 
+import contextlib
 import errno
 import os
 import shutil
@@ -36,19 +36,18 @@ import sys
 import uuid
 from glob import glob
 
-import coverage.cmdline
+import coverage.cmdline  # type: ignore
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def main():
-  # We hack sys.executable to point to this file, which is executable via #! line.
-  # Emscripten uses sys.executable to populate shared.PYTHON, which is used to
-  # invoke all python subprocesses. By making this script run all python subprocesses,
-  # all of them will execute under the watchful eye of emcoverage.py, and resulting
-  # in their code coverage being tracked.
-  sys.executable = os.path.abspath(__file__)
-  os.environ['EMSDK_PYTHON'] = sys.executable
+  # We set EMSDK_PYTHON to point to this file, which is executable via #! line.
+  # Emscripten uses EMSDK_PYTHON to invoke all python subprocesses. By making this
+  # script run all python subprocesses, all of them will execute under the
+  # watchful eye of emcoverage.py, and resulting in their code coverage being
+  # tracked.
+  os.environ['EMSDK_PYTHON'] = os.path.abspath(__file__)
 
   store = os.path.join(SCRIPT_DIR, 'coverage')
 
@@ -57,23 +56,25 @@ def main():
     return
 
   if sys.argv[1] == 'reset':
-    shutil.rmtree(store)
+    shutil.rmtree(store, ignore_errors=True)
     return
 
-  if sys.argv[1] in ('html', 'report', 'xml'):
+  if sys.argv[1] in {'html', 'report', 'xml'}:
     old_argv = sys.argv
-    sys.argv = ['coverage', 'combine'] + glob(os.path.join(store, '*'))
-    try:
+    sys.argv = ['coverage', 'combine', *glob(os.path.join(store, '*'))]
+    with contextlib.suppress(SystemExit):
       coverage.cmdline.main()
-    except SystemExit:
-      pass
-    sys.argv = old_argv + ['-i']
+    sys.argv = [*old_argv, '-i']
     return coverage.cmdline.main()
 
-  if not os.path.exists(sys.argv[1]):
-    # If argv[1] is not a file path, instead try to interpret it as an emscripten command.
-    # This allows `emcoverage.py emcc` or `emcoverage.py embuilder` to work.
-    sys.argv[1] = os.path.join(os.path.dirname(sys.executable), '..', sys.argv[1] + '.py')
+  if sys.argv[1] == '-E':
+    sys.argv.pop(1)
+
+  # If argv[1] is an emscripten command rather than a python script path, resolve it
+  # to the corresponding python script living alongside it.
+  candidate = os.path.splitext(sys.argv[1])[0] + '.py'
+  if os.path.exists(candidate):
+    sys.argv[1] = candidate
 
   try:
     os.mkdir(store)

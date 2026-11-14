@@ -4,51 +4,29 @@
  * SPDX-License-Identifier: MIT
  */
 
+#if PTHREADS
+#include "runtime_pthread.js"
+#endif
+
+#if LOAD_SOURCE_MAP
+#include "source_map_support.js"
+#endif
+
 // === Auto-generated postamble setup entry stuff ===
-{{{ exportRuntime() }}}
-
 #if HAS_MAIN // Only if user is exporting a C main(), we will generate a run() function that can be used to launch main.
-function run() {
-#if MEMORYPROFILER
-  emscriptenMemoryProfiler.onPreloadComplete();
-#endif
-
-  <<< ATMAINS >>>
-
-#if PROXY_TO_PTHREAD
-  // User requested the PROXY_TO_PTHREAD option, so call a stub main which
-  // pthread_create()s a new thread that will call the user's real main() for
-  // the application.
-  var ret = _emscripten_proxy_main();
-#else
-  var ret = _main();
 
 #if EXIT_RUNTIME
-  callRuntimeCallbacks(__ATEXIT__);
+function exitRuntime(ret) {
   <<< ATEXITS >>>
-#if USE_PTHREADS
-  PThread.terminateAllThreads();
+#if PTHREADS
+  PThread.terminateRuntime();
 #endif
-
-#endif
-
-#if IN_TEST_HARNESS && hasExportedFunction('___stdio_exit')
-  // flush any stdio streams for test harness, since there are existing
-  // tests that depend on this behavior.
-  // For production use, instead print full lines to avoid this kind of lazy
-  // behavior.
-  ___stdio_exit();
-#endif
-
-#if EXIT_RUNTIME
 
 #if ASSERTIONS
   runtimeExited = true;
 #endif
 
   _proc_exit(ret);
-#endif
-#endif // PROXY_TO_PTHREAD
 
 #if STACK_OVERFLOW_CHECK
   checkStackCookie();
@@ -56,121 +34,219 @@ function run() {
 }
 #endif
 
-function initRuntime(asm) {
-#if ASSERTIONS || SAFE_HEAP || USE_ASAN
+{{{ globalThis.argc_argv = function(condition) {
+    if (!MAIN_READS_PARAMS) return '';
+    return `argc, ${to64('argv')}`;
+  }
+  globalThis.HEAPptr = MEMORY64 ? 'HEAPU64' : 'HEAPU32';
+  null;
+}}}
+
+function run() {
+#if MEMORYPROFILER
+  emscriptenMemoryProfiler.onPreloadComplete();
+#endif
+
+  <<< ATMAINS >>>
+
+#if MAIN_READS_PARAMS
+  var args =
+#if ENVIRONMENT_MAY_BE_NODE
+    // Remove Node.js executable name from argc/argv to emulate C/C++ standards.
+    ENVIRONMENT_IS_NODE ? process.argv.slice(1) :
+#endif
+    [location.href.split('?')[0], ...location.search.slice(1).split('&').map(decodeURIComponent)];
+
+  // C standard (C17 §5.1.2.2.1/5): "The parameters argc and argv and the
+  // strings pointed to by the argv array shall be modifiable by the program,
+  // and retain their last-stored values between program startup and program
+  // termination."
+  // -> in particular this means that the stackAlloc() that we do below shall
+  // never be undone, and ideally should no longer be considered to be part of
+  // the stack. Though currently it will be. (TODO: figure if this will ever be
+  // a problem)
+  var arg,
+    argc = args.length,
+    argv = stackAlloc(argc * {{{ POINTER_SIZE }}} + {{{ POINTER_SIZE }}}),
+    argvIndex = argv / {{{ POINTER_SIZE }}};
+
+  for (arg of args) {{{ HEAPptr }}}[argvIndex++] = {{{ to64('stringToUTF8OnStack(arg)') }}};
+
+  // C standard (C17 §5.1.2.2.1/2): "argv[argc] shall be a null pointer."
+  {{{ HEAPptr }}}[argvIndex] = {{{ to64(0) }}};
+
+#endif
+
+#if PROXY_TO_PTHREAD
+  // User requested the PROXY_TO_PTHREAD option, so call a stub main which
+  // pthread_create()s a new thread that will call the user's real main() for
+  // the application.
+  __emscripten_proxy_main({{{ argc_argv() }}});
+#elif ASYNCIFY == 2 && EXIT_RUNTIME
+  // In JSPI-enabled build mode, the main() function will return a Promise,
+  // which resolves to the process exit code.
+  _main({{{ argc_argv() }}}).then(exitRuntime);
+#elif EXIT_RUNTIME
+  // In regular exitRuntime mode, exit with the given return code from main().
+  try {
+    exitRuntime(_main({{{ argc_argv() }}}));
+  } catch(e) {
+    var exitCode = e.match(/^exit\((\d+)\)$/);
+    if (exitCode) {
+#if RUNTIME_DEBUG
+      dbg(`main() called ${e}.`); // e.g. "main() called exit(0)."
+#endif
+#if expectToReceiveOnModule('onExit')
+      // Report to Module that the program exited.
+      Module['onExit']?.(exitCode[1]|0);
+#endif
+    } else {
+#if RUNTIME_DEBUG
+      dbg(`main() threw an exception: ${e}.`);
+#endif
+      // Some other exception occurred - re-throw it.
+      throw e;
+    }
+  }
+#else
+  // Run a persistent (never-exiting) application starting at main().
+  _main({{{ argc_argv() }}});
+#endif 
+
+#if STACK_OVERFLOW_CHECK
+  checkStackCookie();
+#endif
+  <<< ATPOSTRUNS >>>
+}
+#endif
+
+function initRuntime(wasmExports) {
+#if ASSERTIONS || SAFE_HEAP || USE_ASAN || MODULARIZE || PTHREADS
   runtimeInitialized = true;
 #endif
 
-#if USE_PTHREADS
-  if (ENVIRONMENT_IS_PTHREAD) {
-    // Export needed variables that worker.js needs to Module.
-    Module['HEAPU32'] = HEAPU32;
-    Module['__emscripten_thread_init'] = __emscripten_thread_init;
-    Module['__emscripten_thread_exit'] = __emscripten_thread_exit;
-    Module['_pthread_self'] = _pthread_self;
-    return;
-  }
+#if PTHREADS
+  PThread.tlsInitFunctions.push(wasmExports['_emscripten_tls_init']);
+  if (ENVIRONMENT_IS_PTHREAD) return;
 #endif
 
 #if WASM_WORKERS
-  if (ENVIRONMENT_IS_WASM_WORKER) return __wasm_worker_initializeRuntime();
+  if (ENVIRONMENT_IS_WASM_WORKER) return _wasmWorkerInitializeRuntime();
 #endif
 
 #if STACK_OVERFLOW_CHECK
   _emscripten_stack_init();
-  writeStackCookie();
 #if STACK_OVERFLOW_CHECK >= 2
-  ___set_stack_limits(_emscripten_stack_get_base(), _emscripten_stack_get_end());
+  setStackLimits();
 #endif
-#endif
-
-#if USE_PTHREADS
-  PThread.tlsInitFunctions.push(asm['emscripten_tls_init']);
-#endif
-
-#if hasExportedFunction('___wasm_call_ctors')
-  asm['__wasm_call_ctors']();
+  writeStackCookie();
 #endif
 
   <<< ATINITS >>>
+
+#if hasExportedSymbol('__wasm_call_ctors')
+  wasmExports['__wasm_call_ctors']();
+#endif
+
+  <<< ATPOSTCTORS >>>
 }
 
 // Initialize wasm (asynchronous)
 
+#if MODULARIZE || AUDIO_WORKLET
+var instantiatePromise;
+#endif
+
+#if SINGLE_FILE && SINGLE_FILE_BINARY_ENCODE && !WASM2JS
+Module['wasm'] = binaryDecode("<<< WASM_BINARY_DATA >>>", "<<< WASM_BINARY_SIZE >>>");
+#elif SINGLE_FILE && WASM == 1 && !WASM2JS
+Module['wasm'] = base64Decode('<<< WASM_BINARY_DATA >>>');
+#endif
+
+#if LibraryManager.has('libexports.js')
+// emscripten_get_exported_function() requires wasmExports to be defined in the
+// outer scope.
+var wasmExports;
+#endif
+
+#if PTHREADS || WASM_WORKERS
+var wasmModule;
+
+function loadModule() {
+  assignWasmImports();
+#endif
+
+#if ASYNCIFY
+Asyncify.instrumentWasmImports(wasmImports);
+#endif
+
 var imports = {
 #if MINIFY_WASM_IMPORTED_MODULES
-  'a': asmLibraryArg,
+  'a': wasmImports,
 #else // MINIFY_WASM_IMPORTED_MODULES
-  'env': asmLibraryArg
-  , '{{{ WASI_MODULE_NAME }}}': asmLibraryArg
+  'env': wasmImports,
+  '{{{ WASI_MODULE_NAME }}}': wasmImports,
 #endif // MINIFY_WASM_IMPORTED_MODULES
 };
 
-// In non-fastcomp non-asm.js builds, grab wasm exports to outer scope
-// for emscripten_get_exported_function() to be able to access them.
-#if LibraryManager.has('library_exports.js')
-var asm;
-#endif
-
-#if USE_PTHREADS
-var wasmModule;
-#if PTHREAD_POOL_SIZE
-function loadWasmModuleToWorkers() {
-#if PTHREAD_POOL_DELAY_LOAD
-  PThread.unusedWorkers.forEach(PThread.loadWasmModuleToWorker);
-#else
-  var numWorkersToLoad = PThread.unusedWorkers.length;
-  PThread.unusedWorkers.forEach(function(w) { PThread.loadWasmModuleToWorker(w, function() {
-    // PTHREAD_POOL_DELAY_LOAD==0: we wanted to synchronously wait until the
-    // Worker pool has loaded up. If all Workers have finished loading up the
-    // Wasm Module, proceed with main()
-    if (!--numWorkersToLoad) ready();
-  })});
-#endif
-}
-#endif
-
-#endif
-
-#if DECLARE_ASM_MODULE_EXPORTS
-<<< WASM_MODULE_EXPORTS_DECLARES >>>
-#endif
-
 #if MINIMAL_RUNTIME_STREAMING_WASM_INSTANTIATION
+{{{
+#if EXPORT_ES6 && !ENVIRONMENT_MAY_BE_AUDIO_WORKLET
+const moduleUrl = `new URL('${TARGET_BASENAME}.wasm', import.meta.url)`;
+#elif !EXPORT_ES6 || AUDIO_WORKLET
+const moduleUrl = `'${TARGET_BASENAME}.wasm'`;
+#else
+const moduleUrl = `ENVIRONMENT_IS_AUDIO_WORKLET ? '${TARGET_BASENAME}.wasm' : new URL('${TARGET_BASENAME}.wasm', import.meta.url)`;
+#endif
+}}}
 // https://caniuse.com/#feat=wasm and https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WebAssembly/instantiateStreaming
-// Firefox 52 added Wasm support, but only Firefox 58 added instantiateStreaming.
-// Chrome 57 added Wasm support, but only Chrome 61 added instantiateStreaming.
-// Node.js and Safari do not support instantiateStreaming.
-#if MIN_FIREFOX_VERSION < 58 || MIN_CHROME_VERSION < 61 || ENVIRONMENT_MAY_BE_NODE || MIN_SAFARI_VERSION != TARGET_NOT_SUPPORTED
+#if ENVIRONMENT_MAY_BE_NODE
 #if ASSERTIONS && !WASM2JS
 // Module['wasm'] should contain a typed array of the Wasm object data, or a
 // precompiled WebAssembly Module.
-if (!WebAssembly.instantiateStreaming && !Module['wasm']) throw 'Must load WebAssembly Module in to variable Module.wasm before adding compiled output .js script to the DOM';
+assert(WebAssembly.instantiateStreaming || Module['wasm'], 'Must load WebAssembly Module in to variable Module.wasm before adding compiled output .js script to the DOM');
+#endif
+#if MODULARIZE || AUDIO_WORKLET
+instantiatePromise =
 #endif
 (WebAssembly.instantiateStreaming
-  ? WebAssembly.instantiateStreaming(fetch('{{{ TARGET_BASENAME }}}.wasm'), imports)
-  : WebAssembly.instantiate(Module['wasm'], imports)).then(function(output) {
+#if ENVIRONMENT_MAY_BE_NODE
+  // Avoid using instantiateStreaming() on Node.js since the `fetch()` API
+  // does not support `file://` URLs.
+  // See: https://github.com/emscripten-core/emscripten/pull/16917
+  && !ENVIRONMENT_IS_NODE
+#endif
+  ? WebAssembly.instantiateStreaming(fetch({{{ moduleUrl }}}), imports)
+  : WebAssembly.instantiate(Module['wasm'], imports)).then((output) => {
 #else
-WebAssembly.instantiateStreaming(fetch('{{{ TARGET_BASENAME }}}.wasm'), imports).then(function(output) {
+#if MODULARIZE || AUDIO_WORKLET
+instantiatePromise =
+#endif
+WebAssembly.instantiateStreaming(fetch({{{ moduleUrl }}}), imports).then((output) => {
 #endif
 
 #else // Non-streaming instantiation
 #if ASSERTIONS && !WASM2JS
 // Module['wasm'] should contain a typed array of the Wasm object data, or a
 // precompiled WebAssembly Module.
-if (!Module['wasm']) throw 'Must load WebAssembly Module in to variable Module.wasm before adding compiled output .js script to the DOM';
+assert(Module['wasm'], 'Must load WebAssembly Module in to variable Module.wasm before adding compiled output .js script to the DOM');
 #endif
 
-WebAssembly.instantiate(Module['wasm'], imports).then(function(output) {
+<<< ATMODULES >>>
+
+{{{ exportJSSymbols() }}}
+
+// Add missingProperties supression here because closure compiler doesn't know that
+// WebAssembly.instantiate is polymorphic in its return value.
+#if MODULARIZE || AUDIO_WORKLET
+instantiatePromise =
+#endif
+WebAssembly.instantiate(Module['wasm'], imports).then(/** @suppress {missingProperties} */ (output) => {
 #endif
 
-#if USE_PTHREADS
-  // Export Wasm module for pthread creation to access.
-  wasmModule = output.module || Module['wasm'];
-#endif
-#if !LibraryManager.has('library_exports.js') && !EMBIND
-  // If not using the emscripten_get_exported_function() API or embind, keep the
-  // 'asm' exports variable in local scope to this instantiate function to save
+#if !LibraryManager.has('libexports.js') && ASYNCIFY != 1
+  // If not using the emscripten_get_exported_function() API, keep the
+  // `wasmExports` variable in local scope to this instantiate function to save
   // code size.  (otherwise access it without to export it to outer scope)
   var
 #endif
@@ -179,97 +255,96 @@ WebAssembly.instantiate(Module['wasm'], imports).then(function(output) {
   // output.module objects. But if Module['wasm'] is an already compiled
   // WebAssembly module, then output is the WebAssembly instance itself.
   // Depending on the build mode, Module['wasm'] can mean a different thing.
-#if MINIMAL_RUNTIME_STREAMING_WASM_COMPILATION || MINIMAL_RUNTIME_STREAMING_WASM_INSTANTIATION || USE_PTHREADS
-  // https://caniuse.com/#feat=wasm and https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WebAssembly/instantiateStreaming
-  // Firefox 52 added Wasm support, but only Firefox 58 added compileStreaming &
-  // instantiateStreaming.
-  // Chrome 57 added Wasm support, but only Chrome 61 added compileStreaming &
-  // instantiateStreaming.
-  // Node.js and Safari do not support compileStreaming or instantiateStreaming.
-#if MIN_FIREFOX_VERSION < 58 || MIN_CHROME_VERSION < 61 || ENVIRONMENT_MAY_BE_NODE || MIN_SAFARI_VERSION != TARGET_NOT_SUPPORTED || USE_PTHREADS
-  // In pthreads, Module['wasm'] is an already compiled WebAssembly.Module. In
-  // that case, 'output' is a WebAssembly.Instance.
+#if PTHREADS || WASM_WORKERS
+  // In pthreads and wasm workers, Module['wasm'] is a compiled
+  // WebAssembly.Module. In that case, 'output' is a WebAssembly.Instance.
   // In main thread, Module['wasm'] is either a typed array or a fetch stream.
   // In that case, 'output.instance' is the WebAssembly.Instance.
-  asm = (output.instance || output).exports;
+  wasmExports = (output.instance || output).exports;
+  // Stash the Wasm module for future worker creation.
+  wasmModule = output.module || Module['wasm'];
+#elif MINIMAL_RUNTIME_STREAMING_WASM_COMPILATION
+  // In MINIMAL_RUNTIME_STREAMING_WASM_COMPILATION mode, Module['wasm'] is the
+  // compiled module so we just get the instance back.
+  wasmExports = output.exports;
 #else
-  asm = output.exports;
-#endif
-#else
-  asm = output.instance.exports;
+  wasmExports = output.instance.exports;
 #endif
 
-#if USE_OFFSET_CONVERTER
-#if USE_PTHREADS
-  if (!ENVIRONMENT_IS_PTHREAD)
-#endif
-    wasmOffsetConverter = new WasmOffsetConverter(Module['wasm'], output.module);
+#if ASYNCIFY
+  wasmExports = Asyncify.instrumentWasmExports(wasmExports);
 #endif
 
-#if !DECLARE_ASM_MODULE_EXPORTS
-  exportAsmFunctions(asm);
-#else
-  <<< WASM_MODULE_EXPORTS >>>
+#if MEMORY64 || CAN_ADDRESS_2GB
+  wasmExports = applySignatureConversions(wasmExports);
 #endif
-  wasmTable = asm['__indirect_function_table'];
-#if ASSERTIONS
-  assert(wasmTable);
-#endif
+
+  assignWasmExports(wasmExports);
 
 #if !IMPORTED_MEMORY
-  wasmMemory = asm['memory'];
-#if ASSERTIONS
-  assert(wasmMemory);
-  assert(wasmMemory.buffer.byteLength === {{{ INITIAL_MEMORY }}});
+  updateMemoryViews();
 #endif
-  updateGlobalBufferAndViews(wasmMemory.buffer);
-#endif
+  <<< ATPRERUNS >>>
 
-#if MEM_INIT_METHOD == 1 && !MEM_INIT_IN_WASM && !SINGLE_FILE
-#if ASSERTIONS
-  if (!Module['mem']) throw 'Must load memory initializer as an ArrayBuffer in to variable Module.mem before adding compiled output .js script to the DOM';
-#endif
-  HEAPU8.set(new Uint8Array(Module['mem']), {{{ GLOBAL_BASE }}});
-#endif
+  initRuntime(wasmExports);
 
-  initRuntime(asm);
-#if USE_PTHREADS && PTHREAD_POOL_SIZE
-  if (!ENVIRONMENT_IS_PTHREAD) loadWasmModuleToWorkers();
-#if !PTHREAD_POOL_DELAY_LOAD
-  else
-#endif
-    ready();
-#else
-  ready();
-#endif
-
-#if USE_PTHREADS
-  // This Worker is now ready to host pthreads, tell the main thread we can proceed.
-  if (ENVIRONMENT_IS_PTHREAD) {
-    postMessage({ 'cmd': 'loaded' });
+{{{ function waitOnStartupPromisesAndEmitReady() {
+  var promises = [];
+  if (PTHREADS && PTHREAD_POOL_SIZE) {
+    promises.push('PThread.loadWasmModuleToAllWorkers()');
   }
+  if (LOAD_SOURCE_MAP) {
+    promises.push('getSourceMapAsync().then(json=>{receiveSourceMapJSON(json)})');
+  }
+  if (promises.length == 0) {
+    return 'ready();'
+  } else if (promises.length == 1) {
+    return `${promises[0]}.then(ready);`;
+  } else {
+    return `Promise.all(${', '.join(promises)}).then(ready);`
+  }
+}
+null;
+}}}
+
+#if PTHREADS && PTHREAD_POOL_SIZE && PTHREAD_POOL_DELAY_LOAD
+  // In PTHREAD_POOL_DELAY_LOAD mode, we kick off loading Wasm Module to all
+  // PThread Workers, but do not wait on it.
+  PThread.loadWasmModuleToAllWorkers();
 #endif
+
+  return {{{ waitOnStartupPromisesAndEmitReady(); }}}
+
 }
 
-#if ASSERTIONS || WASM == 2
-, function(error) {
+#if WASM == 2
+, (error) => {
 #if ASSERTIONS
   console.error(error);
 #endif
 
-#if WASM == 2
 #if ENVIRONMENT_MAY_BE_NODE || ENVIRONMENT_MAY_BE_SHELL
-  if (typeof location != 'undefined') {
+  if (globalThis.location) {
 #endif
     // WebAssembly compilation failed, try running the JS fallback instead.
     var search = location.search;
-    if (search.indexOf('_rwasm=0') < 0) {
+    if (!search.includes('_rwasm=0')) {
       location.href += (search ? search + '&' : '?') + '_rwasm=0';
     }
 #if ENVIRONMENT_MAY_BE_NODE || ENVIRONMENT_MAY_BE_SHELL
   }
 #endif
-#endif // WASM == 2
 }
-#endif // ASSERTIONS || WASM == 2
+#endif // WASM == 2
 );
+
+#if PTHREADS || WASM_WORKERS
+}
+
+// When running in a background thread we delay module loading until we have
+{{{ runIfMainThread('loadModule();') }}}
+#endif
+
+#if MODULARIZE
+await instantiatePromise;
+#endif

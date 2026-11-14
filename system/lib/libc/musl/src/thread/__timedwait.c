@@ -2,13 +2,11 @@
 #include <time.h>
 #include <errno.h>
 #ifdef __EMSCRIPTEN__
-#include <math.h>
-#include <emscripten/threading.h>
-#include <emscripten/emscripten.h>
+#include <math.h> // for INFINITY
 #else
 #include "futex.h"
-#endif
 #include "syscall.h"
+#endif
 #include "pthread_impl.h"
 
 #ifndef __EMSCRIPTEN__
@@ -37,7 +35,7 @@ static int __futex4_cp(volatile void *addr, int op, int val, const struct timesp
 static volatile int dummy = 0;
 weak_alias(dummy, __eintr_valid_flag);
 
-int __timedwait_cp(volatile int *addr, int val,
+int __timedwait_cp(_Atomic int *addr, int val,
 	clockid_t clk, const struct timespec *at, int priv)
 {
 	int r;
@@ -58,40 +56,8 @@ int __timedwait_cp(volatile int *addr, int val,
 	}
 
 #ifdef __EMSCRIPTEN__
-	double msecsToSleep = top ? (top->tv_sec * 1000 + top->tv_nsec / 1000000.0) : INFINITY;
-	int is_runtime_thread = emscripten_is_main_runtime_thread();
-
-	// Main runtime thread may need to run proxied calls, so sleep in very small slices to be responsive.
-	double max_ms_slice_to_sleep = is_runtime_thread ? 1 : 100;
-
-	// cp suffix in the function name means "cancellation point", so this wait can be cancelled
-	// by the users unless current threads cancelability is set to PTHREAD_CANCEL_DISABLE
-	// which may be either done by the user of __timedwait() function.
-	if (is_runtime_thread ||
-	    pthread_self()->canceldisable != PTHREAD_CANCEL_DISABLE ||
-	    pthread_self()->cancelasync == PTHREAD_CANCEL_ASYNCHRONOUS) {
-		double sleepUntilTime = emscripten_get_now() + msecsToSleep;
-		do {
-			if (pthread_self()->cancel) {
-				// Emscripten-specific return value: The wait was canceled by user calling
-				// pthread_cancel() for this thread, and the caller needs to cooperatively
-				// cancel execution.
-				return ECANCELED;
-			}
-			msecsToSleep = sleepUntilTime - emscripten_get_now();
-			if (msecsToSleep <= 0) {
-				r = ETIMEDOUT;
-				break;
-			}
-			// Must wait in slices in case this thread is cancelled in between.
-			if (msecsToSleep > max_ms_slice_to_sleep)
-				msecsToSleep = max_ms_slice_to_sleep;
-			r = -emscripten_futex_wait((void*)addr, val, msecsToSleep);
-		} while (r == ETIMEDOUT);
-	} else {
-		// Can wait in one go.
-		r = -emscripten_futex_wait((void*)addr, val, msecsToSleep);
-	}
+	double msecs_to_sleep = top ? (top->tv_sec * 1000 + top->tv_nsec / 1000000.0) : INFINITY;
+	r = -emscripten_futex_wait((void*)addr, val, msecs_to_sleep);
 #else
 	r = -__futex4_cp(addr, FUTEX_WAIT|priv, val, top);
 #endif
@@ -105,7 +71,7 @@ int __timedwait_cp(volatile int *addr, int val,
 	return r;
 }
 
-int __timedwait(volatile int *addr, int val,
+int __timedwait(_Atomic int *addr, int val,
 	clockid_t clk, const struct timespec *at, int priv)
 {
 	int cs, r;

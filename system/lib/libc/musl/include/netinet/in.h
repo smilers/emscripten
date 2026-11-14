@@ -48,6 +48,7 @@ struct ipv6_mreq {
 #define INADDR_BROADCAST  ((in_addr_t) 0xffffffff)
 #define INADDR_NONE       ((in_addr_t) 0xffffffff)
 #define INADDR_LOOPBACK   ((in_addr_t) 0x7f000001)
+#define INADDR_DUMMY      ((in_addr_t) 0xc0000008)
 
 #define INADDR_UNSPEC_GROUP     ((in_addr_t) 0xe0000000)
 #define INADDR_ALLHOSTS_GROUP   ((in_addr_t) 0xe0000001)
@@ -131,7 +132,8 @@ uint16_t ntohs(uint16_t);
 
 #define IN6_IS_ADDR_V4COMPAT(a) \
         (((uint32_t *) (a))[0] == 0 && ((uint32_t *) (a))[1] == 0 && \
-         ((uint32_t *) (a))[2] == 0 && ((uint8_t *) (a))[15] > 1)
+         ((uint32_t *) (a))[2] == 0 && \
+         !IN6_IS_ADDR_UNSPECIFIED(a) && !IN6_IS_ADDR_LOOPBACK(a))
 
 #define IN6_IS_ADDR_MC_NODELOCAL(a) \
         (IN6_IS_ADDR_MULTICAST(a) && ((((uint8_t *) (a))[1] & 0xf) == 0x1))

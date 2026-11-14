@@ -60,16 +60,6 @@ wss._socket.remotePort;
 /**
  * @suppress {duplicate}
  */
-var process;
-
-/**
- * @suppress {duplicate}
- */
-var assert;
-
-/**
- * @suppress {duplicate}
- */
 var fs;
 
 /**
@@ -97,12 +87,10 @@ Buffer.from = function(arrayBufferOrString, byteOffsetOrEncoding, length) {};
 Buffer.alloc = function(size, fill, encoding) {};
 
 /**
- * @param {number=} start
- * @param {number=} end
- * @return {Buffer}
+ * @return {boolean}
  * @nosideeffects
  */
-Buffer.prototype.slice = function(start, end) {};
+Buffer.isBuffer = function(obj) {};
 
 /**
  * @param {string=} encoding
@@ -111,3 +99,83 @@ Buffer.prototype.slice = function(start, end) {};
  * @nosideeffects
  */
 Buffer.prototype.toString = function(encoding, start, end) {};
+
+Worker.prototype.ref = function() {};
+Worker.prototype.unref = function() {};
+
+/**
+ * @type {number}
+ */
+fs.Stats.prototype.atimeMs;
+
+/**
+ * @type {number}
+ */
+fs.Stats.prototype.mtimeMs;
+
+/**
+ * @type {number}
+ */
+fs.Stats.prototype.ctimeMs;
+
+/**
+ * @type {number}
+ */
+fs.Stats.prototype.blksize;
+
+/**
+ * @const
+ */
+fs.constants = {
+  O_APPEND: 0,
+  O_CREAT: 0,
+  O_EXCL: 0,
+  O_NOCTTY: 0,
+  O_RDONLY: 0,
+  O_RDWR: 0,
+  O_SYNC: 0,
+  O_TRUNC: 0,
+  O_WRONLY: 0,
+  O_NOFOLLOW: 0,
+};
+
+/**
+ * @param {string} p
+ * @return {boolean}
+ * @nosideeffects
+ */
+path.isAbsolute;
+
+/**
+ * @type {Object.<string,*>}
+ */
+path.posix;
+
+crypto.randomFillSync;
+
+/**
+ * @suppress {duplicate}
+ */
+var worker_threads = {};
+
+/**
+ * @type {boolean}
+ */
+worker_threads.isMainThread;
+
+/**
+ * @type {function()}
+ */
+worker_threads.Worker;
+
+/**
+ * @type {Object}
+ */
+worker_threads.workerData;
+
+worker_threads.parentPort;
+
+/**
+ * @type {number}
+ */
+process.stdin.fd;

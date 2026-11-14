@@ -15,30 +15,38 @@ typedef struct __jmp_buf_tag {
 	unsigned long __ss[128/sizeof(long)];
 } jmp_buf[1];
 
+#if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 1)
+#define __setjmp_attr __attribute__((__returns_twice__))
+#else
+#define __setjmp_attr
+#endif
+
 #if defined(_POSIX_SOURCE) || defined(_POSIX_C_SOURCE) \
  || defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
  || defined(_BSD_SOURCE)
 typedef jmp_buf sigjmp_buf;
 /* XXX EMSCRIPTEN: No signals support, alias sigsetjmp and siglongjmp to their non-signals counterparts. */
-#if __EMSCRIPTEN__
+#if __EMSCRIPTEN__ && !defined(LLVM_LIBC)
 #define sigsetjmp(buf, x) setjmp((buf))
 #define siglongjmp(buf, val) longjmp(buf, val)
 #else
-int sigsetjmp (sigjmp_buf, int);
-_Noreturn int siglongjmp (sigjmp_buf, int);
+int sigsetjmp (sigjmp_buf, int) __setjmp_attr;
+_Noreturn void siglongjmp (sigjmp_buf, int);
 #endif
 #endif
 
 #if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
  || defined(_BSD_SOURCE)
-int _setjmp (jmp_buf);
+int _setjmp (jmp_buf) __setjmp_attr;
 _Noreturn void _longjmp (jmp_buf, int);
 #endif
 
-int setjmp (jmp_buf);
+int setjmp (jmp_buf) __setjmp_attr;
 _Noreturn void longjmp (jmp_buf, int);
 
 #define setjmp setjmp
+
+#undef __setjmp_attr
 
 #ifdef __cplusplus
 }

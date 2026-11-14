@@ -75,7 +75,7 @@ if (location.search.indexOf('hideBlocksSmallerThan') != -1) {
 function refresh() {
   var hideBlocksSmallerThan = parseInt(document.getElementById('hideBlocksSmallerThan').value);
   var url = window.location.href;
-  if (url.indexOf('?') != -1) url = url.split('?')[0]
+  if (url.includes('?')) url = url.split('?')[0]
   window.location.href = url + '?hideBlocksSmallerThan=' + hideBlocksSmallerThan;
 }
 
@@ -105,7 +105,7 @@ function cmdLineBasename(cmdLine) {
 
   // cmdline could be '/path/to/node --param /path/to/file/to/run', in which case
   // we want to return 'run' as the interesting command that was executed
-  if (cmdname.indexOf('node') == 0 || cmdname.indexOf('python') == 0) {
+  if (cmdname.startsWith('node') || cmdname.startsWith('python')) {
     var positionalParams = findPositionalParams(cmdLine, []);
     if (positionalParams.length > 0) return cmdLineBasename(positionalParams);
   }
@@ -159,14 +159,10 @@ function findInterestingParams(cmdLine, interestingParams) {
   return p;
 }
 
-function startsWith(str, substr) {
-  return str.indexOf(substr) == 0;
-}
-
 // A heuristic approach to finding print-worthy elements from a given command line array.
 function findInterestingBits(cmdLine) {
   var basename = cmdLineBasename(cmdLine);
-  if (startsWith(basename, 'em++') || startsWith(basename, 'emcc')) {
+  if (basename.startsWith('em++') || basename.startsWith('emcc')) {
     src = findValueOfParam(cmdLine, '-c');
     if (src) src = '-c ' + pathBasename(src);
     else {
@@ -174,7 +170,7 @@ function findInterestingBits(cmdLine) {
       if (src) src = '-o ' + pathBasename(src);
     }
     return [basename, src];
-  } else if (startsWith(basename, 'clang') || startsWith(basename, 'clang++')) {
+  } else if (basename.startsWith('clang') || basename.startsWith('clang++')) {
     var posParams = findPositionalParams(cmdLine, ['-target', '-o']);
     for(var i = 0; i < posParams.length; ++i) {
       if (posParams[i].indexOf('.c') != -1 && (posParams[i].indexOf('/') != -1 || posParams[i].indexOf('\\') != -1))
@@ -184,25 +180,25 @@ function findInterestingBits(cmdLine) {
     if (out) out = '-o ' + pathBasename(out);
     if (cmdLine.length <= 3) return [basename].concat(cmdLine.slice(1));
     return [basename].concat(posParams).concat([out]);
-  } else if (startsWith(basename, 'llvm-ar') || startsWith(basename, 'optimizer') || startsWith(basename, 'asm2wasm') || startsWith(basename, 'wasm-as')) {
+  } else if (basename.startsWith('llvm-ar') || basename.startsWith('optimizer') || basename.startsWith('asm2wasm') || basename.startsWith('wasm-as')) {
     for(var i = 0; i < cmdLine.length; ++i) {
       if (cmdLine[i].indexOf('/') != -1 || cmdLine[i].indexOf('\\') != -1)
         cmdLine[i] = pathBasename(cmdLine[i]);
     }
     return cmdLine;
-  } else if (startsWith(basename, 'opt')) {
+  } else if (basename.startsWith('opt')) {
     var interestingParams = findInterestingParams(cmdLine, ['-O0', '-O1', '-O2', '-O3', '-Os', '-Oz'])
     var out = findValueOfParam(cmdLine, '-o');
     if (out) out = '-o ' + pathBasename(out);
     return [basename].concat(interestingParams).concat([out]);
-  } else if (startsWith(basename, 'llvm-nm')) {
+  } else if (basename.startsWith('llvm-nm')) {
     var posParams = findPositionalParams(cmdLine, []);
     for(var i = 0; i < posParams.length; ++i) {
       if (posParams[i].indexOf('/') != -1 || posParams[i].indexOf('\\') != -1)
         posParams[i] = pathBasename(posParams[i]);
     }
     return [basename].concat(posParams);
-  } else if (startsWith(basename, 'llc')) {
+  } else if (basename.startsWith('llc')) {
     var interestingParams = findInterestingParams(cmdLine, ['-O0', '-O1', '-O2', '-O3', '-Os', '-Oz'])
     var posParams = findPositionalParams(cmdLine, ['-o']);
     for(var i = 0; i < posParams.length; ++i) {
@@ -217,7 +213,7 @@ function findInterestingBits(cmdLine) {
         ret.concat([out]);
     }
     return ret;
-  } else if (startsWith(basename, 'compiler.js')) {
+  } else if (basename.startsWith('compiler.mjs')) {
     var posParams = findPositionalParams(cmdLine, []);
     var interestingParams = [];
     for(var i = 1; i < posParams.length; ++i) {
@@ -226,7 +222,7 @@ function findInterestingBits(cmdLine) {
       interestingParams.push(posParams[i]);
     }
     return [basename].concat(interestingParams);
-  } else if (startsWith(basename, 'js-optimizer.js')) {
+  } else if (basename.startsWith('js-optimizer.js')) {
     var posParams = findPositionalParams(cmdLine, []);
     var interestingParams = [];
     for(var i = 1; i < posParams.length; ++i) {
@@ -292,7 +288,7 @@ function createSwimlaneChart(data) {
         startOrder: startOrder++,
         cmdLine: d.cmdLine,
         cmd: findInterestingBits(d.cmdLine).join(' '),
-        color: d3.rgb('#80ff80'),
+        color: d.color || d3.rgb('#80ff80'),
         parent: null,
         children: []
       };
@@ -316,7 +312,7 @@ function createSwimlaneChart(data) {
         startOrder: startOrder++,
         cmdLine: d.cmdLine,
         cmd: findInterestingBits(d.cmdLine).join(' '),
-        color: d3.rgb('#80ff80'),
+        color: d.color || d3.rgb('#80ff80'),
         parent: topOnStack(d.pid),
         children: []
       };
@@ -340,7 +336,7 @@ function createSwimlaneChart(data) {
         end: null,
         startOrder: startOrder++,
         cmd: d.name,
-        color: d3.rgb('#8080ff'),
+        color: d.color || d3.rgb('#8080ff'),
         parent: topOnStack(d.pid),
         children: []
       };
@@ -592,11 +588,12 @@ function createSwimlaneChart(data) {
     .attr('d', function(d) { return d.path; });
 
   // draw the selection area
+  var selectionExtent = [
+         d3.min(items, function(d) { return d.start; }),
+         d3.max(items, function(d) { return d.end; })];
   var brush = d3.svg.brush()
     .x(x)
-    .extent([
-         d3.min(items, function(d) { return d.start; }),
-         d3.max(items, function(d) { return d.end; })])
+    .extent(selectionExtent)
     .on("brush", display);
 
   mini.append('g')
@@ -610,8 +607,8 @@ function createSwimlaneChart(data) {
   display();
 
   function display () {
-    var minExtent = Math.max(0, brush.extent()[0]);
-    var maxExtent = Math.min(lastEndTime, brush.extent()[1]);
+    var minExtent = Math.max(selectionExtent[0], brush.extent()[0]);
+    var maxExtent = Math.min(selectionExtent[1], brush.extent()[1]);
     var visItems = items.filter(function (d) { return d.start < maxExtent && d.end > minExtent});
 
     mini.select('.brush').call(brush.extent([minExtent, maxExtent]));
@@ -635,7 +632,7 @@ function createSwimlaneChart(data) {
           .duration(500)
           .style("opacity", 0);
     }
-    // upate the item rects
+    // update the item rects
     var rects = itemRects.selectAll('rect')
       .data(visItems, function (d) { return d.id; })
       .attr('x', function(d) { return x1(d.start); })

@@ -16,9 +16,6 @@
 // underscore.
 var WASM_EXPORTS = [];
 
-// Similar to above but only includes the functions symbols.
-var WASM_FUNCTION_EXPORTS = [];
-
 // An array of all symbols exported from all the side modules specified on the
 // command line.
 // These are raw symbol names and are not mangled to include the leading
@@ -29,8 +26,18 @@ var SIDE_MODULE_EXPORTS = [];
 // module (or other side modules) will need to provide.
 var SIDE_MODULE_IMPORTS = [];
 
-// Like EXPORTED_FUNCTIONS, but will not error if symbol is missing
-var EXPORT_IF_DEFINED = ['__start_em_asm', '__stop_em_asm'];
+// Like EXPORTED_FUNCTIONS, but will not error if symbol is missing.
+// The start/stop symbols are included by default so that then can be extracted
+// from the binary and embedded into the generated JS.  The PostEmscripten pass
+// in binaryen will then strip these exports so they will not appear in the
+// final shipping binary.
+// They are included here rather than in REQUIRED_EXPORTS because not all
+// programs contains EM_JS or EM_ASM data section, in which case these symbols
+// won't exist.
+var EXPORT_IF_DEFINED = ['__start_em_asm', '__stop_em_asm',
+                         '__start_em_lib_deps', '__stop_em_lib_deps',
+                         '__start_em_js', '__stop_em_js',
+                         '__start_em_embind', '__stop_em_embind'];
 
 // Like EXPORTED_FUNCTIONS, but symbol is required to exist in native code.
 // This means wasm-ld will fail if these symbols are missing.
@@ -46,21 +53,16 @@ var TARGET_JS_NAME = '';
 // full filesystem support. Otherwise, when just a small subset are used, we can
 // get away without including the full filesystem - in particular, if open() is
 // never used, then we don't actually need to support operations on streams.
-var SYSCALLS_REQUIRE_FILESYSTEM = 1;
-
-// A list of feature flags to pass to each binaryen invocation (like wasm-opt,
-// etc.). This is received from wasm-emscripten-finalize, which reads it from
-// the features section.
-var BINARYEN_FEATURES = [];
+var SYSCALLS_REQUIRE_FILESYSTEM = true;
 
 // Whether EMCC_AUTODEBUG is on, which automatically instruments code for
 // runtime logging that can help in debugging.
-var AUTODEBUG = 0;
+var AUTODEBUG = false;
 
 // Whether we should use binaryen's wasm2js to convert our wasm to JS. Set when
 // wasm backend is in use with WASM=0 (to enable non-wasm output, we compile to
 // wasm normally, then compile that to JS).
-var WASM2JS = 0;
+var WASM2JS = false;
 
 // Whether we should link in the runtime for ubsan.
 // 0 means do not link ubsan, 1 means link minimal ubsan runtime.
@@ -71,39 +73,42 @@ var UBSAN_RUNTIME = 0;
 
 // Whether we should link in LSan's runtime library. This is intended to be used
 // by -fsanitize=leak instead of used directly.
-var USE_LSAN = 0;
+var USE_LSAN = false;
 
 // Whether we should link in ASan's runtime library. This is intended to be used
 // by -fsanitize=leak instead of used directly.
-var USE_ASAN = 0;
-
-// Whether we should load the WASM source map at runtime.
-// This is enabled automatically when using -g4 with sanitizers.
-var LOAD_SOURCE_MAP = 0;
+var USE_ASAN = false;
 
 // Whether embind has been enabled.
-var EMBIND = 0;
+var EMBIND = false;
+
+// Whether a TypeScript definition file has been requested.
+var EMIT_TSD = false;
+
+// This will be true during the generation of code in run_embind_gen. Helpful
+// for detecting if either TSD file or embind AOT JS generation is running.
+var EMBIND_GEN_MODE = false;
+
+// List of 5-tuple embind invoker signatures expanded from the em_embind section.
+var EMBIND_INVOKERS = [];
 
 // Whether the main() function reads the argc/argv parameters.
-var MAIN_READS_PARAMS = 1;
-
-// Name of the file containing the Fetch *.fetch.js, if relevant
-var FETCH_WORKER_FILE = '';
+var MAIN_READS_PARAMS = true;
 
 var WASI_MODULE_NAME = "wasi_snapshot_preview1";
 
-// List of JS libraries explictly linked against.  This includes JS system
-// libraries (specified via -lfoo or -lfoo.js) in addition to user libraries
-// passed via `--js-library`.  It does not include implicitly linked libraries
-// added by the JS compiler.
+// List of JS libraries explicitly linked against.  This includes JS specified
+// on the command line via `-lfoo.js` / `--js-library`.  It does not include
+// implicitly linked libraries added by the JS compiler.
 var JS_LIBRARIES = [];
 
 // This will contain the emscripten version. This can be useful in combination
-// with RETAIN_COMPILER_SETTINGS
+// with external JS library files that need to check the version of emscripten
+// they are being used with.
 var EMSCRIPTEN_VERSION = '';
 
 // Will be set to 0 if -fno-rtti is used on the command line.
-var USE_RTTI = 1;
+var USE_RTTI = true;
 
 // This will contain the optimization level (-Ox).
 var OPT_LEVEL = 0;
@@ -114,64 +119,51 @@ var DEBUG_LEVEL = 0;
 // This will contain the shrink level (1 or 2 for -Os or -Oz, or just 0).
 var SHRINK_LEVEL = 0;
 
-// Whether or not to emit the name section in the final wasm binaryen.
-var EMIT_NAME_SECTION = 0;
+// Whether or not to emit the name section in the final wasm binary.
+var EMIT_NAME_SECTION = false;
 
 // Whether we are emitting a symbol map.
-var EMIT_SYMBOL_MAP = 0;
+var EMIT_SYMBOL_MAP = false;
 
-// List of function explicitly exported by user on the command line.
-var USER_EXPORTED_FUNCTIONS = [];
+// List of symbols explicitly exported by user on the command line.
+var USER_EXPORTS = [];
 
 // name of the file containing wasm binary, if relevant
 var WASM_BINARY_FILE = '';
 
-// name of the file containing the pthread *.worker.js, if relevant
-var PTHREAD_WORKER_FILE = '';
-
-// name of the file containing the Wasm Worker *.ww.js, if relevant
-var WASM_WORKER_FILE = '';
-
 // Base URL the source mapfile, if relevant
 var SOURCE_MAP_BASE = '';
 
-var MEM_INIT_IN_WASM = 0;
-
-// If set to 1, src/base64Utils.js will be included in the bundle.
+// If set to 1 then base64 decoding functions will be included in the bundle.
 // This is set internally when needed (SINGLE_FILE)
-var SUPPORT_BASE64_EMBEDDING = 0;
+var SUPPORT_BASE64_EMBEDDING = false;
 
 // the possible environments the code may run in.
-var ENVIRONMENT_MAY_BE_WEB = 1;
-var ENVIRONMENT_MAY_BE_WORKER = 1;
-var ENVIRONMENT_MAY_BE_NODE = 1;
-var ENVIRONMENT_MAY_BE_SHELL = 1;
-var ENVIRONMENT_MAY_BE_WEBVIEW = 1;
+var ENVIRONMENT_MAY_BE_WEB = true;
+var ENVIRONMENT_MAY_BE_WORKER = true;
+var ENVIRONMENT_MAY_BE_NODE = true;
+var ENVIRONMENT_MAY_BE_SHELL = true;
+var ENVIRONMENT_MAY_BE_WEBVIEW = true;
+var ENVIRONMENT_MAY_BE_AUDIO_WORKLET = true;
 
 // Whether to minify import and export names in the minify_wasm_js stage.
 // Currently always off for MEMORY64.
-var MINIFY_WASM_IMPORTS_AND_EXPORTS = 0;
+var MINIFY_WASM_IMPORTS_AND_EXPORTS = false;
 
 // Whether to minify imported module names.
-var MINIFY_WASM_IMPORTED_MODULES = 0;
+var MINIFY_WASM_IMPORTED_MODULES = false;
 
-// Whether to minify functions exported from Asm.js/Wasm module.
-var MINIFY_ASMJS_EXPORT_NAMES = 1;
+// Whether to minify exports from the Wasm module.
+var MINIFY_WASM_EXPORT_NAMES = true;
 
-// Internal: represents a browser version that is not supported at all.
-var TARGET_NOT_SUPPORTED = 0x7FFFFFFF;
 
-// Wasm backend symbols that are considered system symbols and don't
-// have the normal C symbol name mangled applied (== prefix with an underscore)
-// (Also implicily on this list is any function that starts with string "dynCall_")
-var WASM_SYSTEM_EXPORTS = ['stackAlloc', 'stackSave', 'stackRestore'];
-
-// Internal: value of -flto argument (either full or thin)
-var LTO = 0;
-
-// Whether we may be accessing the address 2GB or higher. If so then we need
-// to be using unsigned pointers in JS.
-var CAN_ADDRESS_2GB = 0;
+// Whether we may be accessing the address 2GB or higher. If so, then we need
+// to interpret incoming i32 pointers as unsigned.
+//
+// This setting does not apply (and is never set to true) under MEMORY64, since
+// in that case we get 64-bit pointers coming through to JS (converting them to
+// i53 in most cases).
+var CAN_ADDRESS_2GB = false;
 
 // Whether to emit DWARF in a separate wasm file on the side (this is not called
 // "split" because there is already a DWARF concept by that name).
@@ -179,37 +171,34 @@ var CAN_ADDRESS_2GB = 0;
 // file, ending in .debug.wasm, has the same wasm binary + all the debug
 // sections.
 // This has no effect if DWARF is not being emitted.
-var SEPARATE_DWARF = 0;
+var SEPARATE_DWARF = false;
 
-// New WebAssembly exception handling (experimental)
-var EXCEPTION_HANDLING = 0;
-
-// Used internally when running the JS compiler simply to generate list of all
-// JS symbols. This is used by LLD_REPORT_UNDEFINED to generate a list of all
-// JS library symbols.
-var ONLY_CALC_JS_SYMBOLS = 0;
+// Target WebAssembly exception handling instead of JavaScript-side exception
+// handling. Furthermore, if WASM_LEGACY_EXCEPTIONS=1, then old legacy Wasm
+// exception handling is used, and if WASM_LEGACY_EXCEPTIONS=0, then Wasm
+// exception handling is targeted.
+// Enabled by passing -fwasm-exceptions on the command line.
+var WASM_EXCEPTIONS = false;
 
 // Set to true if the program has a main function.  By default this is
 // enabled, but if `--no-entry` is passed, or if `_main` is not part of
 // EXPORTED_FUNCTIONS then this gets set to 0.
-var EXPECT_MAIN = 1;
-
-// Provide and export a .ready() Promise. This is currently used by default with
-// MODULARIZE, and returned from the factory function.
-var EXPORT_READY_PROMISE = 1;
-
-// struct_info that is either generated or cached
-var STRUCT_INFO = '';
+var EXPECT_MAIN = true;
 
 // If true, building against Emscripten's wasm heap memory profiler.
-var MEMORYPROFILER = 0;
+var MEMORYPROFILER = false;
 
+// Set automatically to :
+// - 1 when using `-gsource-map`
+// - 2 when using `gsource-map=inline` (embed sources content in source map)
 var GENERATE_SOURCE_MAP = 0;
+
+var GENERATE_DWARF = false;
 
 // Memory layout.  These are only used/set in RELOCATABLE builds.  Otherwise
 // memory layout is fixed in the wasm binary at link time.
-var STACK_BASE = 0;
-var STACK_MAX = 0;
+var STACK_HIGH = 0;
+var STACK_LOW = 0;
 var HEAP_BASE = 0;
 
 // Used internally. set when there is a main() function.
@@ -218,16 +207,105 @@ var HEAP_BASE = 0;
 // the current compilation unit.
 // Also set for STANDALONE_WASM since the _start function is needed to call
 // static ctors, even if there is no user main.
-var HAS_MAIN = 0;
+var HAS_MAIN = false;
 
 // Set to true if we are linking as C++ and including C++ stdlibs
-var LINK_AS_CXX = 0;
+var LINK_AS_CXX = false;
 
-// Set when some minimum browser version triggers doesn't support the
-// minimum set of ES6 featurs.  This triggers transpilation to ES5
-// using closure compiler.
-var TRANSPILE_TO_ES5 = 0;
+// Set when closure compiler may be run: Either emcc will run it, or the user
+// might run it after emcc. Either way, some JS changes and annotations must be
+// emitted in that case for closure compiler.
+var MAYBE_CLOSURE_COMPILER = false;
 
-// A copy of the default the default INCOMING_MODULE_JS_API. (Soon to
+// List of closure args for the closure compiler.
+// This list is populated from the --closure-args argument and can be extended
+// in ports using settings.CLOSURE_ARGS
+var CLOSURE_ARGS = [];
+
+var EXTRA_INCOMING_JS_API = [
+  'fetchSettings',
+  'logReadFiles',
+  'loadSplitModule',
+  'onMalloc',
+  'onRealloc',
+  'onFree',
+  'onSbrkGrow',
+  'onCOSCacheHit',
+  'onCOSCacheMiss',
+  'onCOSStore',
+  'GL_MAX_TEXTURE_IMAGE_UNITS',
+  'SDL_canPlayWithWebAudio',
+  'SDL_numSimultaneouslyQueuedBuffers',
+  'freePreloadedMediaOnUse',
+  'preinitializedWebGLContext',
+  'keyboardListeningElement',
+  'doNotCaptureKeyboard',
+  'extraStackTrace',
+  'preloadPlugins',
+  'preMainLoop',
+  'postMainLoop',
+  'forcedAspectRatio',
+  'mainScriptUrlOrBlob',
+  'onFullScreen',
+  'INITIAL_MEMORY',
+  'wasmMemory',
+  'wasmBinary'
+];
+
+// A copy of the default INCOMING_MODULE_JS_API. (Soon to
 // include additional items).
-var ALL_INCOMING_MODULE_JS_API = []
+var ALL_INCOMING_MODULE_JS_API = [];
+
+// List of all imports that are weak, and therefore allowed to be undefined at
+// runtime.  This is used by the JS compiler to avoid build-time warnings/errors
+// when weak symbols are undefined.  Only applies in the case of dynamic linking
+// (MAIN_MODULE).
+var WEAK_IMPORTS = [];
+
+var STACK_FIRST = false;
+
+var HAVE_EM_ASM = true;
+
+var PRE_JS_FILES = [];
+
+var POST_JS_FILES = [];
+
+// Set when -pthread / -sPTHREADS is passed
+var PTHREADS = false;
+
+var MINIFY_WHITESPACE = true;
+
+var ASYNCIFY_IMPORTS_EXCEPT_JS_LIBS = [];
+
+var WARN_DEPRECATED = true;
+
+// WebGL 2 provides new garbage-free entry points to call to WebGL. Use
+// those always when possible.
+// We currently set this to false for certain browsers when large memory sizes
+// (2gb+ or 4gb+) are used
+var WEBGL_USE_GARBAGE_FREE_APIS = false;
+
+var INCLUDE_WEBGL1_FALLBACK = true;
+
+var MINIFICATION_MAP = '';
+
+var OUTPUT_FORMAT = '';
+
+// Whether we should load the WASM source map at runtime.
+// This is enabled automatically when using -gsource-map with sanitizers.
+var LOAD_SOURCE_MAP = false;
+
+var ALIASES = [];
+
+// Internal setting for passing EM_JS and EM_ASM function code snippets to JSifier so that
+// implicit heap dependencies (e.g. HEAP8, HEAP32) can be scanned and included automatically
+// without needing to search for them in Python.
+// This could be removed if/when we require explicit heap dependencies (via EM_JS_DEPS).
+var EM_JS_SNIPPETS = [];
+
+// List of public setting names (Used by RETAIN_COMPILER_SETTINGS)
+var PUBLIC_SETTINGS = [];
+
+// Bounds of the static .rodata section extracted at link time for string caching.
+var RODATA_START = 0;
+var RODATA_END = 0;

@@ -13,67 +13,150 @@ running multiple build commands in parallel, confusion can occur).
 """
 
 import argparse
+import fnmatch
 import logging
+import os
 import sys
 import time
+from contextlib import contextmanager
 
-from tools import shared
-from tools import system_libs
-from tools import ports
+from tools import cache, ports, shared, system_libs, utils
+from tools.cmdline import options
 from tools.settings import settings
-import emscripten
+from tools.system_libs import USE_NINJA
 
-
-# Minimal subset of targets used by CI systems to build enough to useful
+# Minimal subset of targets used by CI systems to build enough to be useful
 MINIMAL_TASKS = [
-    'libcompiler_rt',
-    'libc',
-    'libc-debug',
-    'libc-optz',
-    'libc-optz-debug',
-    'libc++abi',
-    'libc++abi-except',
-    'libc++abi-noexcept',
-    'libc++',
-    'libc++-except',
-    'libc++-noexcept',
-    'libal',
-    'libdlmalloc',
-    'libdlmalloc-debug',
-    'libemmalloc',
-    'libemmalloc-debug',
-    'libemmalloc-memvalidate',
-    'libemmalloc-verbose',
-    'libemmalloc-memvalidate-verbose',
-    'libGL',
-    'libhtml5',
-    'libsockets',
-    'libstubs',
-    'libstubs-debug',
-    'struct_info',
-    'libstandalonewasm',
-    'crt1',
-    'libunwind-except',
-    'libnoexit',
+  'libemcc',
+  'libemcc-mt',
+  'libemcc-legacysjlj',
+  'libemcc-wasmsjlj',
+  'libemcc-ww',
+  'libclang_rt.builtins',
+  'libclang_rt.builtins-mt',
+  'libclang_rt.builtins-ww',
+  'libclang_rt.profile',
+  'libclang_rt.asan',
+  'libclang_rt.asan-mt',
+  'libclang_rt.lsan',
+  'libclang_rt.lsan-mt',
+  'libclang_rt.lsan_common',
+  'libclang_rt.lsan_common-mt',
+  'libclang_rt.sanitizer_common',
+  'libclang_rt.sanitizer_common-mt',
+  'libclang_rt.ubsan',
+  'libclang_rt.ubsan-mt',
+  'libc',
+  'libc-asan-debug',
+  'libc-debug',
+  'libc-mt-debug',
+  'libc-mt-asan-debug',
+  'libc-ww-debug',
+  'libc_optz',
+  'libc_optz-debug',
+  'libc++abi',
+  'libc++abi-legacyexcept',
+  'libc++abi-wasmexcept',
+  'libc++abi-noexcept',
+  'libc++abi-debug',
+  'libc++abi-debug-legacyexcept',
+  'libc++abi-debug-wasmexcept',
+  'libc++abi-debug-noexcept',
+  'libc++abi-debug-mt-noexcept',
+  'libc++abi-debug-ww-noexcept',
+  'libc++',
+  'libc++-legacyexcept',
+  'libc++-wasmexcept',
+  'libc++-noexcept',
+  'libc++-ww-noexcept',
+  'libc++-debug',
+  'libc++-debug-wasmexcept',
+  'libc++-debug-legacyexcept',
+  'libc++-debug-noexcept',
+  'libc++-debug-mt-noexcept',
+  'libc++-debug-ww-noexcept',
+  'libal',
+  'libdlmalloc',
+  'libdlmalloc-tracing',
+  'libdlmalloc-debug',
+  'libdlmalloc-mt-debug',
+  'libdlmalloc-ww',
+  'libdlmalloc-ww-debug',
+  'libembind',
+  'libembind-rtti',
+  'libembind-mt-rtti',
+  'libemmalloc',
+  'libemmalloc-debug',
+  'libemmalloc-memvalidate',
+  'libemmalloc-verbose',
+  'libemmalloc-memvalidate-verbose',
+  'libmimalloc',
+  'libmimalloc-mt',
+  'libopenmp',
+  'libGL',
+  'libGL-getprocaddr',
+  'libGL-mt-getprocaddr',
+  'libGL-emu-getprocaddr',
+  'libGL-emu-webgl2-ofb-getprocaddr',
+  'libGL-webgl2-ofb-getprocaddr',
+  'libGL-webgl2-ofb-full_es3-getprocaddr',
+  'libGL-ww-getprocaddr',
+  'libhtml5',
+  'libsockets',
+  'libsockets-mt',
+  'libsockets-ww',
+  'libstubs',
+  'libstubs-debug',
+  'libstandalonewasm-nocatch',
+  'crt1',
+  'crt1_proxy_main',
+  'crtbegin-mt',
+  'libunwind-legacyexcept',
+  'libunwind-wasmexcept',
+  'libnoexit',
+  'bullet',
+  'libstb_image',
+  'libwasmfs_no_fs',
+  'libwasmfs-debug',
+  'libwasm_workers-debug',
 ]
 
-# Variant builds that we want to support for certain ports
-# TODO: It would be nice if the ports themselves could specify the variants that they
-# support.
-PORT_VARIANTS = {
-    'regal-mt': ('regal', {'USE_PTHREADS': 1}),
-    'harfbuzz-mt': ('harfbuzz', {'USE_PTHREADS': 1}),
-    'sdl2-mt': ('sdl2', {'USE_PTHREADS': 1}),
-    'icu-mt': ('icu', {'USE_PTHREADS': 1}),
-    'sdl2_mixer_mp3': ('sdl2_mixer', {'SDL2_MIXER_FORMATS': ["mp3"]}),
-    'sdl2_mixer_none': ('sdl2_mixer', {'SDL2_MIXER_FORMATS': []}),
-    'sdl2_image_png': ('sdl2_image', {'SDL2_IMAGE_FORMATS': ["png"]}),
-    'sdl2_image_jpg': ('sdl2_image', {'SDL2_IMAGE_FORMATS': ["jpg"]}),
-}
+# Additional tasks on top of MINIMAL_TASKS that are necessary for PIC testing on
+# CI (which has slightly more tests than other modes that want to use MINIMAL)
+MINIMAL_PIC_TASKS = [
+  *MINIMAL_TASKS,
+  'libc-mt',
+  'libc_optz-mt',
+  'libc_optz-mt-debug',
+  'libc++abi-mt',
+  'libc++abi-mt-noexcept',
+  'libc++abi-debug-mt',
+  'libc++-mt',
+  'libc++-mt-noexcept',
+  'libc++-debug-mt',
+  'libdlmalloc-mt',
+  'libGL-emu',
+  'libGL-emu-webgl2-getprocaddr',
+  'libGL-mt-emu',
+  'libGL-mt-emu-webgl2-getprocaddr',
+  'libGL-mt-emu-webgl2-ofb-getprocaddr',
+  'libGL-mt-webgl2-ofb-getprocaddr',
+  'libsockets_proxy',
+  'libfetch',
+  'libfetch-mt',
+  'libwasmfs',
+  'giflib',
+  'sdl2',
+  'sdl2_image',
+  'sdl2_image-legacysjlj',
+  'sdl2_image-wasmsjlj',
+  'sdl2_gfx',
+  'sdl3',
+]
 
-PORTS = sorted(list(ports.ports_by_name.keys()) + list(PORT_VARIANTS.keys()))
+PORTS = sorted(list(ports.ports_by_name.keys()) + list(ports.port_variants.keys()))
 
-temp_files = shared.configuration.get_temp_files()
+temp_files = shared.get_temp_files()
 logger = logging.getLogger('embuilder')
 legacy_prefixes = {
   'libgl': 'libGL',
@@ -81,44 +164,58 @@ legacy_prefixes = {
 
 
 def get_help():
-  all_tasks = get_system_tasks()[1] + PORTS
+  all_tasks = get_all_tasks()
   all_tasks.sort()
-  return '''
+  tasks_str = '\n        '.join(all_tasks)
+  return f'''
 Available targets:
 
-  build / clear %s
+  build / clear
+        {tasks_str}
 
 Issuing 'embuilder build ALL' causes each task to be built.
-''' % '\n        '.join(all_tasks)
+'''
 
 
-def clear_port(port_name):
-  ports.clear_port(port_name, settings)
-
-
-def build_port(port_name):
-  if port_name in PORT_VARIANTS:
-    port_name, extra_settings = PORT_VARIANTS[port_name]
+@contextmanager
+def get_port_variant(name):
+  if name in ports.port_variants:
+    name, extra_settings = ports.port_variants[name]
     old_settings = settings.dict().copy()
     for key, value in extra_settings.items():
       setattr(settings, key, value)
   else:
     old_settings = None
 
-  ports.build_port(port_name, settings)
-  if old_settings:
-    settings.dict().update(old_settings)
+  try:
+    yield name
+  finally:
+    if old_settings:
+      settings.dict().update(old_settings)
+
+
+def clear_port(port_name):
+  with get_port_variant(port_name) as port_name_base:
+    ports.clear_port(port_name_base, settings)
+
+
+def build_port(port_name):
+  with get_port_variant(port_name) as port_name_base:
+    ports.build_port(port_name_base, settings)
 
 
 def get_system_tasks():
   system_libraries = system_libs.Library.get_all_variations()
-  system_tasks = list(system_libraries.keys())
-  # This is needed to build the generated_struct_info.json file.
-  # It is not a system library, but it needs to be built before
-  # running with FROZEN_CACHE.
-  system_tasks += ['struct_info']
-
+  system_tasks = [name for name, lib in system_libraries.items() if not lib.experimental]
   return system_libraries, system_tasks
+
+
+def get_all_tasks():
+  return get_system_tasks()[1] + PORTS
+
+
+def handle_port_error(target, message):
+  utils.exit_with_error(f'error building port `{target}` | {message}')
 
 
 def main():
@@ -130,67 +227,97 @@ def main():
   parser.add_argument('--lto', action='store_const', const='full', help='build bitcode object for LTO')
   parser.add_argument('--lto=thin', dest='lto', action='store_const', const='thin', help='build bitcode object for ThinLTO')
   parser.add_argument('--pic', action='store_true',
-                      help='build relocatable objects for suitable for dynamic linking')
-  parser.add_argument('--force', action='store_true',
+                      help='build relocatable objects suitable for dynamic linking')
+  parser.add_argument('-f', '--force', action='store_true',
                       help='force rebuild of target (by removing it first)')
-  parser.add_argument('--verbose', action='store_true',
+  parser.add_argument('-v', '--verbose', action='store_true',
                       help='show build commands')
   parser.add_argument('--wasm64', action='store_true',
                       help='use wasm64 architecture')
-  parser.add_argument('operation', help='currently only "build" and "clear" are supported')
-  parser.add_argument('targets', nargs='+', help='see below')
+  parser.add_argument('operation', choices=['build', 'clear', 'rebuild'])
+  parser.add_argument('targets', nargs='*', help='see below')
   args = parser.parse_args()
 
-  if args.operation not in ('build', 'clear'):
-    shared.exit_with_error('unfamiliar operation: ' + args.operation)
+  if args.operation != 'rebuild' and len(args.targets) == 0:
+    utils.exit_with_error('no build targets specified')
+
+  if args.operation == 'rebuild' and not USE_NINJA:
+    utils.exit_with_error('"rebuild" operation is only valid when using Ninja')
 
   # process flags
 
   # Check sanity so that if settings file has changed, the cache is cleared here.
   # Otherwise, the cache will clear in an emcc process, which is invoked while building
   # a system library into the cache, causing trouble.
+  cache.setup()
   shared.check_sanity()
 
   if args.lto:
-    settings.LTO = args.lto
+    options.lto = args.lto
 
   if args.verbose:
-    shared.PRINT_STAGES = True
+    shared.PRINT_SUBPROCS = True
 
   if args.pic:
-    settings.RELOCATABLE = 1
+    settings.MAIN_MODULE = 1
+    # Note: we have to filter out the `-ww` libraries here because wasm workers don't
+    # support dynamic linking.
+    global MINIMAL_TASKS
+    global MINIMAL_PIC_TASKS
+    MINIMAL_TASKS = [t for t in MINIMAL_TASKS if '-ww' not in t]
+    MINIMAL_PIC_TASKS = [t for t in MINIMAL_PIC_TASKS if '-ww' not in t]
 
   if args.wasm64:
-    settings.MEMORY64 = 2
-    MINIMAL_TASKS[:] = [t for t in MINIMAL_TASKS if 'emmalloc' not in t]
+    settings.MEMORY64 = 1
 
   do_build = args.operation == 'build'
   do_clear = args.operation == 'clear'
   if args.force:
     do_clear = True
 
+  system_libraries, system_tasks = get_system_tasks()
+
   # process tasks
   auto_tasks = False
-  tasks = args.targets
-  system_libraries, system_tasks = get_system_tasks()
-  if 'SYSTEM' in tasks:
-    tasks = system_tasks
-    auto_tasks = True
-  elif 'USER' in tasks:
-    tasks = PORTS
-    auto_tasks = True
-  elif 'MINIMAL' in tasks:
-    tasks = MINIMAL_TASKS
-    auto_tasks = True
-  elif 'ALL' in tasks:
-    tasks = system_tasks + PORTS
-    auto_tasks = True
+  task_targets = dict.fromkeys(args.targets) # use dict to keep targets order
+
+  # substitute
+  predefined_tasks = {
+    'SYSTEM': system_tasks,
+    'USER': PORTS,
+    'MINIMAL': MINIMAL_TASKS,
+    'MINIMAL_PIC': MINIMAL_PIC_TASKS,
+    'ALL': system_tasks + PORTS,
+  }
+  for name, tasks in predefined_tasks.items():
+    if name in task_targets:
+      task_targets[name] = tasks
+      auto_tasks = True
+
+  # flatten tasks
+  tasks = []
+  for name, targets in task_targets.items():
+    if targets is None:
+      # Use target name as task
+      if '*' in name:
+        tasks.extend(fnmatch.filter(get_all_tasks(), name))
+      else:
+        tasks.append(name)
+    else:
+      # There are some ports that we don't want to build as part
+      # of ALL since they are not well tested or widely used:
+      if 'cocos2d' in targets:
+        targets.remove('cocos2d')
+
+      # Use targets from predefined_tasks
+      tasks.extend(targets)
+
   if auto_tasks:
-    # cocos2d: must be ported, errors on
-    # "Cannot recognize the target platform; are you targeting an unsupported platform?"
-    skip_tasks = ['cocos2d']
-    tasks = [x for x in tasks if x not in skip_tasks]
-    print('Building targets: %s' % ' '.join(tasks))
+    print(f"Building targets: {' '.join(tasks)}")
+
+  if USE_NINJA:
+    os.environ['EMBUILDER_PORT_BUILD_DEFERRED'] = '1'
+
   for what in tasks:
     for old, new in legacy_prefixes.items():
       if what.startswith(old):
@@ -205,32 +332,41 @@ def main():
       if do_clear:
         library.erase()
       if do_build:
-        library.get_path()
+        if USE_NINJA:
+          library.generate()
+        else:
+          library.build()
     elif what == 'sysroot':
       if do_clear:
-        shared.Cache.erase_file('sysroot_install.stamp')
+        cache.erase_file('sysroot_install.stamp')
       if do_build:
         system_libs.ensure_sysroot()
-    elif what == 'struct_info':
-      if do_clear:
-        emscripten.clear_struct_info()
-      if do_build:
-        emscripten.generate_struct_info()
     elif what in PORTS:
       if do_clear:
         clear_port(what)
       if do_build:
         build_port(what)
+    elif ':' in what or what.endswith('.py'):
+      name = ports.handle_use_port_arg(settings, what, lambda message: handle_port_error(what, message))
+      if do_clear:
+        clear_port(name)
+      if do_build:
+        build_port(name)
     else:
       logger.error('unfamiliar build target: ' + what)
       return 1
 
     time_taken = time.time() - start_time
-    logger.info('...success. Took %s(%.2fs)' % (('%02d:%02d mins ' % (time_taken // 60, time_taken % 60) if time_taken >= 60 else ''), time_taken))
+    mins = f'{int(time_taken // 60):02d}:{int(time_taken % 60):02d} mins ' if time_taken >= 60 else ''
+    logger.info(f'...success. Took {mins}({time_taken:.2f}s)')
 
-  if len(tasks) > 1:
+  if USE_NINJA and args.operation != 'clear':
+    system_libs.build_deferred()
+
+  if len(tasks) > 1 or USE_NINJA:
     all_build_time_taken = time.time() - all_build_start_time
-    logger.info('Built %d targets in %s(%.2fs)' % (len(tasks), ('%02d:%02d mins ' % (all_build_time_taken // 60, all_build_time_taken % 60) if all_build_time_taken >= 60 else ''), all_build_time_taken))
+    mins = f'{int(all_build_time_taken // 60):02d}:{int(all_build_time_taken % 60):02d} mins ' if all_build_time_taken >= 60 else ''
+    logger.info(f'Built {len(tasks)} targets in {mins}({all_build_time_taken:.2f}s)')
 
   return 0
 

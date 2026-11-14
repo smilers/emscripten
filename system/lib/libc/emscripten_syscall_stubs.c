@@ -4,63 +4,39 @@
  * University of Illinois/NCSA Open Source License.  Both these licenses can be
  * found in the LICENSE file.
  *
- * Unimplemented/dummy syscall implemenations. These fall into 3 catagories.
+ * Unimplemented/dummy syscall implementations. These fall into 3 categories.
  *
  * 1. Fake it, use dummy/placeholder values and return success.
  * 2. Fake it, as above but warn at runtime if called.
  * 3. Return ENOSYS and warn at runtime if called.
  */
 
+#define _GNU_SOURCE // for struct mmsghdr
 #include <errno.h>
-#include <stdio.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <syscall_arch.h>
 #include <string.h>
-#include <sys/resource.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <sys/utsname.h>
+#include <emscripten/syscalls.h>
 #include <emscripten/console.h>
+#include <emscripten/stack.h>
 
-static int g_pid = 42;
-static int g_pgid = 42;
-static int g_ppid = 1;
-static int g_sid = 42;
-static mode_t g_umask = S_IRWXU | S_IRWXG | S_IRWXO;
+static pid_t g_pid = 42;
+static pid_t g_pgid = 42;
+static pid_t g_ppid = 1;
+static pid_t g_sid = 42;
 
 #ifdef NDEBUG
 #define REPORT(name)
 #else
 #define REPORT(name) \
-  emscripten_console_error("warning: unsupported syscall: __syscall_" #name "\n");
+  emscripten_err("warning: unsupported syscall: __syscall_" #name);
 #endif
 
 #define UNIMPLEMENTED(name, args) \
-  long __syscall_##name args { \
+  weak int __syscall_##name args { \
     REPORT(name); \
     return -ENOSYS; \
   }
 
-long __syscall_uname(long buf) {
-  if (!buf) {
-    return -EFAULT;
-  }
-  struct utsname *utsname = (struct utsname *)buf;
-
-  strcpy(utsname->sysname, "Emscripten");
-  strcpy(utsname->nodename, "emscripten");
-  strcpy(utsname->release, "1.0");
-  strcpy(utsname->version, "#1");
-#ifdef __wams64__
-  strcpy(utsname->machine, "wasm64");
-#else
-  strcpy(utsname->machine, "wasm32");
-#endif
-  return 0;
-}
-
-long __syscall_setpgid(long pid, long pgid) {
+weak int __syscall_setpgid(pid_t pid, pid_t pgid) {
   if (pid && pid != g_pid) {
     return -ESRCH;
   }
@@ -70,172 +46,147 @@ long __syscall_setpgid(long pid, long pgid) {
   return 0;
 }
 
-long __syscall_sync() {
+weak int __syscall_sync() {
   return 0;
 }
 
-long __syscall_getsid(long pid) {
+weak pid_t __syscall_getsid(pid_t pid) {
   if (pid && pid != g_pid) {
     return -ESRCH;
   }
   return g_sid;
 }
 
-long __syscall_getpgid(long pid) {
+weak pid_t __syscall_getpgid(pid_t pid) {
   if (pid && pid != g_pid) {
     return -ESRCH;
   }
   return g_pgid;
 }
 
-long __syscall_getpid() {
+weak pid_t __syscall_getpid() {
   return g_pid;
 }
 
-long __syscall_getppid() {
+weak pid_t __syscall_getppid() {
   return g_ppid;
 }
 
-long __syscall_link(long oldpath, long newpath) {
-  return -EMLINK; // no hardlinks for us
-}
-
-long __syscall_nice(long inc) {
-  return -EPERM; // no meaning to nice for our single-process environment
-}
-
-long __syscall_getgroups32(long size, long list) {
-  if (size < 1) {
+weak int __syscall_getgroups32(int count, gid_t list[]) {
+  if (count < 1) {
     return -EINVAL;
   }
-  ((gid_t*)list)[0] = 0;
+  list[0] = 0;
   return 1;
 }
 
-long __syscall_setsid() {
+weak pid_t __syscall_setsid() {
   return 0; // no-op
 }
 
-long  __syscall_umask(long mask) {
-  long old = g_umask;
-  g_umask = mask;
-  return old;
-}
-
-long __syscall_setrlimit(long resource, long limit) {
-  return 0; // no-op
-}
-
-long __syscall_getrusage(long who, long usage) {
+weak int __syscall_getrusage(int who, struct rusage *usage) {
   REPORT(getrusage);
-  struct rusage *u = (struct rusage *)usage;
-  memset(u, 0, sizeof(*u));
-  u->ru_utime.tv_sec = 1;
-  u->ru_utime.tv_usec = 2;
-  u->ru_stime.tv_sec = 3;
-  u->ru_stime.tv_usec = 4;
+  usage->ru_utime = (struct timeval)
+    { .tv_sec = 1, .tv_usec = 2 };
+  usage->ru_stime = (struct timeval)
+    { .tv_sec = 3, .tv_usec = 4 };
   return 0;
 }
 
-long __syscall_getpriority(long which, long who) {
+weak int __syscall_getpriority(int which, id_t who) {
   return 0;
 }
 
-long __syscall_setpriority(long which, long who, long prio) {
+weak int __syscall_setpriority(int which, id_t who, int prio) {
   return -EPERM;
 }
 
-long __syscall_setdomainname(long name, long size) {
+weak int __syscall_setdomainname(const char *name, size_t len) {
   return -EPERM;
 }
 
-long __syscall_getresuid32(long ruid, long euid, long suid) {
-  *((uid_t *)ruid) = 0;
-  *((uid_t *)euid) = 0;
-  *((uid_t *)suid) = 0;
+weak int __syscall_getresuid32(uid_t *ruid, uid_t *euid, uid_t *suid) {
+  *ruid = 0;
+  *euid = 0;
+  *suid = 0;
   return 0;
 }
 
-long __syscall_getresgid32(long ruid, long euid, long suid) {
+weak int __syscall_getresgid32(gid_t *rgid, gid_t *egid, gid_t *sgid) {
   REPORT(getresgid32);
-  *((uid_t *)ruid) = 0;
-  *((uid_t *)euid) = 0;
-  *((uid_t *)suid) = 0;
+  *rgid = 0;
+  *egid = 0;
+  *sgid = 0;
   return 0;
 }
 
-long __syscall_pause() {
-  REPORT(pause);
-  return -EINTR; // we can't pause
-}
-
-long __syscall_madvise(long addr, long length, long advice) {
+weak int __syscall_madvise(void *addr, size_t length, int advice) {
   REPORT(madvise);
   // advice is welcome, but ignored
   return 0;
 }
 
-long __syscall_mlock(long addr, long len) {
+weak int __syscall_mlock(const void *addr, size_t len) {
   REPORT(mlock);
   return 0;
 }
 
-long __syscall_munlock(long addr, long len) {
+weak int __syscall_munlock(const void *addr, size_t len) {
   REPORT(munlock);
   return 0;
 }
 
-long __syscall_mprotect(long addr, long len, long size) {
+weak int __syscall_mprotect(size_t start, size_t len, int prot) {
   REPORT(mprotect);
   return 0; // let's not and say we did
 }
 
-long __syscall_mremap(long old_addr, long old_size, long new_size, long flags, long new_addr) {
+weak int __syscall_mremap(void *old_addr, size_t old_size, size_t new_size, int flags, void *new_addr) {
   REPORT(mremap);
   return -ENOMEM; // never succeed
 }
 
-long __syscall_mlockall(long flags) {
+weak int __syscall_mlockall(int flags) {
   REPORT(mlockall);
   return 0;
 }
 
-long __syscall_munlockall() {
+weak int __syscall_munlockall() {
   REPORT(munlockall);
   return 0;
 }
 
-long __syscall_prlimit64(long pid, long resource, long new_limit, long old_limit) {
+weak int __syscall_prlimit64(pid_t pid, int resource, const struct rlimit *new_limit, struct rlimit *old_limit) {
   REPORT(prlimit64);
-  struct rlimit *old = (struct rlimit *)old_limit;
-  if (old) { // just report no limits
-    old->rlim_cur = RLIM_INFINITY;
-    old->rlim_max = RLIM_INFINITY;
+  if (new_limit) {
+    return -EPERM;
+  }
+  if (old_limit) {
+    if (resource == RLIMIT_NOFILE) {
+      // See FS.MAX_OPEN_FDS in src/lib/libfs.js
+      old_limit->rlim_cur = 4096;
+      old_limit->rlim_max = 4096;
+    } else if (resource == RLIMIT_STACK) {
+      uintptr_t end = emscripten_stack_get_end();
+      uintptr_t base = emscripten_stack_get_base();
+
+      old_limit->rlim_cur = base - end;
+      // we can not change the stack size, so the maximum is the same as the current
+      old_limit->rlim_max = base - end;
+    } else {
+      // Just report no limits
+      old_limit->rlim_cur = RLIM_INFINITY;
+      old_limit->rlim_max = RLIM_INFINITY;
+    }
   }
   return 0;
 }
 
-long __syscall_ugetrlimit(long resource, long rlim) {
-  REPORT(ugetrlimit);
-  struct rlimit * limits = (struct rlimit *)rlim;
-  limits->rlim_cur = RLIM_INFINITY;
-  limits->rlim_max = RLIM_INFINITY;
-  return 0; // just report no limits
+weak pid_t __syscall_wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage) {
+  REPORT(wait4);
+  return -1;
 }
 
-long __syscall_setsockopt(long sockfd, long level, long optname, long optval, long optlen, long dummy) {
-  REPORT(setsockopt);
-  return -ENOPROTOOPT; // The option is unknown at the level indicated.
-}
-
-UNIMPLEMENTED(acct, (long filename))
-UNIMPLEMENTED(mincore, (long addr, long length, long vec))
-UNIMPLEMENTED(pipe2, (long fds, long flags))
-UNIMPLEMENTED(pselect6, (long nfds, long readfds, long writefds, long exceptfds, long timeout, long sigmaks))
-UNIMPLEMENTED(recvmmsg, (long sockfd, long msgvec, long vlen, long flags, ...))
-UNIMPLEMENTED(sendmmsg, (long sockfd, long msgvec, long vlen, long flags, ...))
-UNIMPLEMENTED(setitimer, (long which, long new_value, long old_value))
-UNIMPLEMENTED(getitimer, (long which, long old_value))
-UNIMPLEMENTED(shutdown, (long sockfd, long level, long optname, long optval, long optlen, long dummy))
-UNIMPLEMENTED(socketpair, (long sockfd, long level, long optname, long optval, long optlen, long dummy))
-UNIMPLEMENTED(wait4,(long pid, long wstatus, long options, long rusage))
+UNIMPLEMENTED(acct, (const char *filename))
+UNIMPLEMENTED(mincore, (void *addr, size_t length, unsigned char *vec))
+UNIMPLEMENTED(socketpair, (int domain, int type, int protocol, int fd[2], int unused1, int unused2))

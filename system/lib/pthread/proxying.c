@@ -6,347 +6,789 @@
  */
 
 #include <assert.h>
+#include <emscripten/proxying.h>
 #include <emscripten/threading.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "proxying.h"
-
-#define TASK_QUEUE_INITIAL_CAPACITY 128
-
-extern int _emscripten_notify_proxying_queue(pthread_t target_thread,
-                                             pthread_t curr_thread,
-                                             pthread_t main_thread,
-                                             em_proxying_queue* queue);
-
-typedef struct task {
-  void (*func)(void*);
-  void* arg;
-} task;
-
-// A task queue for a particular thread. Organized into a linked list of
-// task_queues for different threads.
-typedef struct task_queue {
-  // The target thread for this task_queue.
-  pthread_t thread;
-  // Recursion guard. TODO: We disallow recursive processing because that's what
-  // the old proxying API does, so it is safer to start with the same behavior.
-  // Experiment with relaxing this restriction once the old API uses these
-  // queues as well.
-  int processing;
-  // Ring buffer of tasks of size `capacity`. New tasks are enqueued at
-  // `tail` and dequeued at `head`.
-  task* tasks;
-  int capacity;
-  int head;
-  int tail;
-} task_queue;
-
-static int task_queue_init(task_queue* tasks, pthread_t thread) {
-  task* task_buffer = malloc(sizeof(task) * TASK_QUEUE_INITIAL_CAPACITY);
-  if (task_buffer == NULL) {
-    return 0;
-  }
-  *tasks = (task_queue){.thread = thread,
-                        .processing = 0,
-                        .tasks = task_buffer,
-                        .capacity = TASK_QUEUE_INITIAL_CAPACITY,
-                        .head = 0,
-                        .tail = 0};
-  return 1;
-}
-
-static void task_queue_deinit(task_queue* tasks) { free(tasks->tasks); }
-
-// Not thread safe.
-static int task_queue_is_empty(task_queue* tasks) {
-  return tasks->head == tasks->tail;
-}
-
-// Not thread safe.
-static int task_queue_full(task_queue* tasks) {
-  return tasks->head == (tasks->tail + 1) % tasks->capacity;
-}
-
-// // Not thread safe. Returns 1 on success and 0 on failure.
-static int task_queue_grow(task_queue* tasks) {
-  // Allocate a larger task queue.
-  int new_capacity = tasks->capacity * 2;
-  task* new_tasks = malloc(sizeof(task) * new_capacity);
-  if (new_tasks == NULL) {
-    return 0;
-  }
-  // Copy the tasks such that the head of the queue is at the beginning of the
-  // buffer. There are two cases to handle: either the queue wraps around the
-  // end of the old buffer or it does not.
-  int queued_tasks;
-  if (tasks->head <= tasks->tail) {
-    // No wrap. Copy the tasks in one chunk.
-    queued_tasks = tasks->tail - tasks->head;
-    memcpy(new_tasks, &tasks->tasks[tasks->head], sizeof(task) * queued_tasks);
-  } else {
-    // Wrap. Copy `first_queued` tasks up to the end of the old buffer and
-    // `last_queued` tasks at the beginning of the old buffer.
-    int first_queued = tasks->capacity - tasks->head;
-    int last_queued = tasks->tail;
-    queued_tasks = first_queued + last_queued;
-    memcpy(new_tasks, &tasks->tasks[tasks->head], sizeof(task) * first_queued);
-    memcpy(new_tasks + first_queued, tasks->tasks, sizeof(task) * last_queued);
-  }
-  free(tasks->tasks);
-  tasks->tasks = new_tasks;
-  tasks->capacity = new_capacity;
-  tasks->head = 0;
-  tasks->tail = queued_tasks;
-  return 1;
-}
-
-// Not thread safe. Returns 1 on success and 0 on failure.
-static int task_queue_enqueue(task_queue* tasks, task t) {
-  if (task_queue_full(tasks) && !task_queue_grow(tasks)) {
-    return 0;
-  }
-  tasks->tasks[tasks->tail] = t;
-  tasks->tail = (tasks->tail + 1) % tasks->capacity;
-  return 1;
-}
-
-// Not thread safe. Assumes the queue is not empty.
-static task task_queue_dequeue(task_queue* tasks) {
-  task t = tasks->tasks[tasks->head];
-  tasks->head = (tasks->head + 1) % tasks->capacity;
-  return t;
-}
+#include "em_task_queue.h"
+#include "thread_mailbox.h"
+#include "threading_internal.h"
 
 struct em_proxying_queue {
-  // Protects all accesses to all task_queues.
+  // Protects all accesses to task_queues, size, and capacity. We
+  // must not allocate while holding this lock to prevent deadlocks
+  // on the system proxying queue.
   pthread_mutex_t mutex;
-  // `size` task queues stored in an array of size `capacity`.
-  task_queue* task_queues;
+  // `size` task queue pointers stored in an array of size `capacity`.
+  em_task_queue** task_queues;
   int size;
   int capacity;
 };
 
-static em_proxying_queue system_proxying_queue = {.mutex =
-                                                    PTHREAD_MUTEX_INITIALIZER,
-                                                  .task_queues = NULL,
-                                                  .size = 0,
-                                                  .capacity = 0};
+// The system proxying queue.
+static em_proxying_queue system_proxying_queue = {
+  .mutex = PTHREAD_MUTEX_INITIALIZER,
+  .task_queues = NULL,
+  .size = 0,
+  .capacity = 0,
+};
 
 em_proxying_queue* emscripten_proxy_get_system_queue(void) {
   return &system_proxying_queue;
 }
 
 em_proxying_queue* em_proxying_queue_create(void) {
+  // Allocate the new queue.
   em_proxying_queue* q = malloc(sizeof(em_proxying_queue));
   if (q == NULL) {
     return NULL;
   }
-  *q = (em_proxying_queue){.mutex = PTHREAD_MUTEX_INITIALIZER,
-                           .task_queues = NULL,
-                           .size = 0,
-                           .capacity = 0};
+  *q = (em_proxying_queue){
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .task_queues = NULL,
+    .size = 0,
+    .capacity = 0,
+  };
   return q;
 }
 
 void em_proxying_queue_destroy(em_proxying_queue* q) {
   assert(q != NULL);
   assert(q != &system_proxying_queue && "cannot destroy system proxying queue");
-  // No need to acquire the lock; no one should be racing with the destruction
-  // of the queue.
+
   pthread_mutex_destroy(&q->mutex);
   for (int i = 0; i < q->size; i++) {
-    task_queue_deinit(&q->task_queues[i]);
+    em_task_queue_destroy(q->task_queues[i]);
   }
   free(q->task_queues);
   free(q);
 }
 
-// Not thread safe. Returns -1 if there are no tasks for the thread.
-static int get_tasks_index_for_thread(em_proxying_queue* q, pthread_t thread) {
+// Not thread safe. Returns NULL if there are no tasks for the thread.
+static em_task_queue* get_tasks_for_thread(em_proxying_queue* q,
+                                           pthread_t thread) {
   assert(q != NULL);
   for (int i = 0; i < q->size; i++) {
-    if (pthread_equal(q->task_queues[i].thread, thread)) {
-      return i;
+    if (pthread_equal(q->task_queues[i]->thread, thread)) {
+      return q->task_queues[i];
     }
   }
-  return -1;
+  return NULL;
 }
 
-// Not thread safe.
-static task_queue* get_or_add_tasks_for_thread(em_proxying_queue* q,
-                                               pthread_t thread) {
-  int tasks_index = get_tasks_index_for_thread(q, thread);
-  if (tasks_index != -1) {
-    return &q->task_queues[tasks_index];
+static em_task_queue* get_or_add_tasks_for_thread(em_proxying_queue* q,
+                                                  pthread_t thread) {
+  pthread_mutex_lock(&q->mutex);
+  em_task_queue* tasks = get_tasks_for_thread(q, thread);
+  pthread_mutex_unlock(&q->mutex);
+  if (tasks != NULL) {
+    return tasks;
   }
-  // There were no tasks for the thread; initialize a new task_queue. If there
-  // are not enough queues, allocate more.
-  if (q->size == q->capacity) {
-    int new_capacity = q->capacity == 0 ? 1 : q->capacity * 2;
-    task_queue* new_task_queues =
-      realloc(q->task_queues, sizeof(task_queue) * new_capacity);
-    if (new_task_queues == NULL) {
-      return NULL;
-    }
-    q->task_queues = new_task_queues;
-    q->capacity = new_capacity;
-  }
-  // Initialize the next available task queue.
-  task_queue* tasks = &q->task_queues[q->size];
-  if (!task_queue_init(tasks, thread)) {
+
+  // There were no tasks for the thread; initialize a new em_task_queue outside
+  // the lock so allocations cannot deadlock with queue execution.
+  em_task_queue* new_tasks = em_task_queue_create(thread);
+  if (new_tasks == NULL) {
     return NULL;
   }
-  q->size++;
+
+  // Holds the newly allocated task_queues array before it is installed, or the
+  // old task_queues array after they are swapped so it can be freed outside
+  // the lock.
+  em_task_queue** queues_to_free = NULL;
+  pthread_mutex_lock(&q->mutex);
+  while (true) {
+    // Re-check in case another thread added the queue while unlocked.
+    tasks = get_tasks_for_thread(q, thread);
+    if (tasks != NULL) {
+      pthread_mutex_unlock(&q->mutex);
+      goto out;
+    }
+    if (q->size < q->capacity) {
+      // We have free capacity to add a new queue.
+      break;
+    }
+    // There is not capacity for more queues; reallocate outside the lock.
+    int new_capacity = q->capacity == 0 ? 1 : q->capacity * 2;
+    pthread_mutex_unlock(&q->mutex);
+    em_task_queue** new_task_queues =
+      realloc(queues_to_free, sizeof(em_task_queue*) * new_capacity);
+    if (new_task_queues == NULL) {
+      goto out;
+    }
+    queues_to_free = new_task_queues;
+    pthread_mutex_lock(&q->mutex);
+    if (q->capacity < new_capacity) {
+      // Copy existing queues to the new array.
+      if (q->task_queues != NULL) {
+        memcpy(
+          queues_to_free, q->task_queues, sizeof(em_task_queue*) * q->size);
+      }
+      // Install the new array and arrange for the old to be freed.
+      em_task_queue** old_task_queues = q->task_queues;
+      q->task_queues = queues_to_free;
+      q->capacity = new_capacity;
+      queues_to_free = old_task_queues;
+    }
+  }
+  // Add the new task queue.
+  q->task_queues[q->size++] = new_tasks;
+  pthread_mutex_unlock(&q->mutex);
+  tasks = new_tasks;
+  new_tasks = NULL;
+
+out:
+  if (queues_to_free != NULL) {
+    free(queues_to_free);
+  }
+  if (new_tasks != NULL) {
+    em_task_queue_destroy(new_tasks);
+  }
   return tasks;
 }
 
-// Exported for use in worker.js.
-EMSCRIPTEN_KEEPALIVE
+static _Thread_local bool executing_system_queue = false;
+
 void emscripten_proxy_execute_queue(em_proxying_queue* q) {
   assert(q != NULL);
+  assert(pthread_self());
 
   // Recursion guard to avoid infinite recursion when we arrive here from the
   // pthread_lock call below that executes the system queue. The per-task_queue
   // recursion lock can't catch these recursions because it can only be checked
   // after the lock has been acquired.
-  static _Thread_local int executing_system_queue = 0;
-  int is_system_queue = q == &system_proxying_queue;
+  bool is_system_queue = q == &system_proxying_queue;
   if (is_system_queue) {
     if (executing_system_queue) {
       return;
     }
-    executing_system_queue = 1;
+    executing_system_queue = true;
   }
 
   pthread_mutex_lock(&q->mutex);
-  int tasks_index = get_tasks_index_for_thread(q, pthread_self());
-  task_queue* tasks = tasks_index == -1 ? NULL : &q->task_queues[tasks_index];
-  if (tasks == NULL || tasks->processing) {
-    // No tasks for this thread or they are already being processed.
-    goto end;
-  }
-  // Found the task queue; process the tasks.
-  tasks->processing = 1;
-  while (!task_queue_is_empty(tasks)) {
-    task t = task_queue_dequeue(tasks);
-    // Unlock while the task is running to allow more work to be queued in
-    // parallel.
-    pthread_mutex_unlock(&q->mutex);
-    t.func(t.arg);
-    pthread_mutex_lock(&q->mutex);
-    // The tasks might have been reallocated, so recalculate the pointer.
-    tasks = &q->task_queues[tasks_index];
-  }
-  tasks->processing = 0;
-
-end:
+  em_task_queue* tasks = get_tasks_for_thread(q, pthread_self());
   pthread_mutex_unlock(&q->mutex);
+
+  if (tasks != NULL && !tasks->processing) {
+    // Found the task queue and it is not already being processed; process it.
+    em_task_queue_execute(tasks);
+  }
+
   if (is_system_queue) {
-    executing_system_queue = 0;
+    executing_system_queue = false;
   }
 }
 
-int emscripten_proxy_async(em_proxying_queue* q,
+static bool do_proxy(em_proxying_queue* q, pthread_t target_thread, task t) {
+  assert(q != NULL);
+  em_task_queue* tasks = get_or_add_tasks_for_thread(q, target_thread);
+  if (tasks == NULL) {
+    return false;
+  }
+
+  bool ret = em_task_queue_send(tasks, t);
+
+  // When proxying work to the main thread using the system queue we have a
+  // special case in that we need to wake the target thread in case it is in
+  // `emscripten_futex_wait`. Additionally, the _dlopen_proxying_queue also
+  // requires a wakeup of the target thread after enqueuing work.
+  bool is_system_queue = q == &system_proxying_queue;
+  bool needs_notify =
+#ifdef EMSCRIPTEN_DYNAMIC_LINKING
+    q == _dlopen_proxying_queue ||
+#endif
+    (is_system_queue &&
+     pthread_equal(target_thread, emscripten_main_runtime_thread_id()));
+  if (ret && needs_notify) {
+    DBG("waking target thread using _emscripten_thread_notify");
+    _emscripten_thread_notify(target_thread);
+  }
+  return ret;
+}
+
+bool emscripten_proxy_async(em_proxying_queue* q,
                            pthread_t target_thread,
                            void (*func)(void*),
                            void* arg) {
-  assert(q != NULL);
-  pthread_mutex_lock(&q->mutex);
-  task_queue* tasks = get_or_add_tasks_for_thread(q, target_thread);
-  if (tasks == NULL) {
-    goto failed;
-  }
-  int empty = task_queue_is_empty(tasks);
-  if (!task_queue_enqueue(tasks, (task){func, arg})) {
-    goto failed;
-  }
-  pthread_mutex_unlock(&q->mutex);
-  // If the queue was previously empty, notify the target thread to process it.
-  // Otherwise, the target thread was already notified when the existing work
-  // was enqueued so we don't need to notify it again.
-  if (empty) {
-    _emscripten_notify_proxying_queue(
-      target_thread, pthread_self(), emscripten_main_browser_thread_id(), q);
-  }
-  return 1;
-
-failed:
-  pthread_mutex_unlock(&q->mutex);
-  return 0;
+  return do_proxy(q, target_thread, (task){func, NULL, arg});
 }
+
+enum ctx_kind { SYNC, CALLBACK };
+
+enum ctx_state { PENDING, DONE, CANCELED };
 
 struct em_proxying_ctx {
   // The user-provided function and argument.
   void (*func)(em_proxying_ctx*, void*);
   void* arg;
-  // Set `done` to 1 and signal the condition variable once the proxied task is
-  // done.
-  int done;
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
+
+  enum ctx_kind kind;
+  union {
+    // Context for synchronous proxying.
+    struct {
+      // Update `state` and signal the condition variable once the proxied task
+      // is done or canceled.
+      enum ctx_state state;
+      pthread_mutex_t mutex;
+      pthread_cond_t cond;
+    } sync;
+
+    // Context for proxying with callbacks.
+    struct {
+      em_proxying_queue* queue;
+      pthread_t caller_thread;
+      void (*callback)(void*);
+      void (*cancel)(void*);
+    } cb;
+  };
+
+  // A doubly linked list of contexts associated with active work on a single
+  // thread. If the thread is canceled, it will traverse this list to find
+  // contexts that need to be canceled.
+  struct em_proxying_ctx* next;
+  struct em_proxying_ctx* prev;
 };
 
-static void em_proxying_ctx_init(em_proxying_ctx* ctx,
-                                 void (*func)(em_proxying_ctx*, void*),
-                                 void* arg) {
-  *ctx = (em_proxying_ctx){.func = func,
-                           .arg = arg,
-                           .done = 0,
-                           .mutex = PTHREAD_MUTEX_INITIALIZER,
-                           .cond = PTHREAD_COND_INITIALIZER};
+// The key that `cancel_active_ctxs` is bound to so that it runs when a thread
+// is canceled or exits.
+static pthread_key_t active_ctxs;
+static pthread_once_t active_ctxs_once = PTHREAD_ONCE_INIT;
+
+static void cancel_ctx(void* arg);
+static void cancel_active_ctxs(void* arg);
+
+static void init_active_ctxs(void) {
+  int ret = pthread_key_create(&active_ctxs, cancel_active_ctxs);
+  assert(ret == 0);
+  (void)ret;
+}
+
+static void add_active_ctx(em_proxying_ctx* ctx) {
+  assert(ctx != NULL);
+  em_proxying_ctx* head = pthread_getspecific(active_ctxs);
+  if (head == NULL) {
+    // This is the only active context; initialize the active contexts list.
+    ctx->next = ctx->prev = ctx;
+    pthread_setspecific(active_ctxs, ctx);
+  } else {
+    // Insert this context at the tail of the list just before `head`.
+    ctx->next = head;
+    ctx->prev = head->prev;
+    ctx->next->prev = ctx;
+    ctx->prev->next = ctx;
+  }
+}
+
+static void remove_active_ctx(em_proxying_ctx* ctx) {
+  assert(ctx != NULL);
+  assert(ctx->next != NULL);
+  assert(ctx->prev != NULL);
+  if (ctx->next == ctx) {
+    // This is the only active context; clear the active contexts list.
+    ctx->next = ctx->prev = NULL;
+    pthread_setspecific(active_ctxs, NULL);
+    return;
+  }
+
+  // Update the list head if we are removing the current head.
+  em_proxying_ctx* head = pthread_getspecific(active_ctxs);
+  if (ctx == head) {
+    pthread_setspecific(active_ctxs, head->next);
+  }
+
+  // Remove the context from the list.
+  ctx->prev->next = ctx->next;
+  ctx->next->prev = ctx->prev;
+  ctx->next = ctx->prev = NULL;
+}
+
+static void cancel_active_ctxs(void* arg) {
+  pthread_setspecific(active_ctxs, NULL);
+  em_proxying_ctx* head = arg;
+  em_proxying_ctx* curr = head;
+  do {
+    em_proxying_ctx* next = curr->next;
+    cancel_ctx(curr);
+    curr = next;
+  } while (curr != head);
+}
+
+static void em_proxying_ctx_init_sync(em_proxying_ctx* ctx,
+                                      void (*func)(em_proxying_ctx*, void*),
+                                      void* arg) {
+  pthread_once(&active_ctxs_once, init_active_ctxs);
+  *ctx = (em_proxying_ctx){
+    .func = func,
+    .arg = arg,
+    .kind = SYNC,
+    .sync =
+      {
+        .state = PENDING,
+        .mutex = PTHREAD_MUTEX_INITIALIZER,
+        .cond = PTHREAD_COND_INITIALIZER,
+      },
+  };
+}
+
+static void em_proxying_ctx_init_callback(em_proxying_ctx* ctx,
+                                          em_proxying_queue* queue,
+                                          pthread_t caller_thread,
+                                          void (*func)(em_proxying_ctx*, void*),
+                                          void (*callback)(void*),
+                                          void (*cancel)(void*),
+                                          void* arg) {
+  pthread_once(&active_ctxs_once, init_active_ctxs);
+  *ctx = (em_proxying_ctx){
+    .func = func,
+    .arg = arg,
+    .kind = CALLBACK,
+    .cb =
+      {
+        .queue = queue,
+        .caller_thread = caller_thread,
+        .callback = callback,
+        .cancel = cancel,
+      },
+  };
 }
 
 static void em_proxying_ctx_deinit(em_proxying_ctx* ctx) {
-  pthread_mutex_destroy(&ctx->mutex);
-  pthread_cond_destroy(&ctx->cond);
+  if (ctx->kind == SYNC) {
+    pthread_mutex_destroy(&ctx->sync.mutex);
+    pthread_cond_destroy(&ctx->sync.cond);
+  }
+  // TODO: We should probably have some kind of refcounting scheme to keep
+  // `queue` alive for callback ctxs.
+}
+
+static void free_ctx(void* arg) {
+  em_proxying_ctx* ctx = arg;
+  em_proxying_ctx_deinit(ctx);
+  free(ctx);
+}
+
+// Free the callback info on the same thread it was originally allocated on.
+// This may be more efficient.
+static void call_callback_then_free_ctx(void* arg) {
+  em_proxying_ctx* ctx = arg;
+  ctx->cb.callback(ctx->arg);
+  free_ctx(ctx);
 }
 
 void emscripten_proxy_finish(em_proxying_ctx* ctx) {
-  pthread_mutex_lock(&ctx->mutex);
-  ctx->done = 1;
-  pthread_mutex_unlock(&ctx->mutex);
-  pthread_cond_signal(&ctx->cond);
+  if (ctx->kind == SYNC) {
+    pthread_mutex_lock(&ctx->sync.mutex);
+    ctx->sync.state = DONE;
+    remove_active_ctx(ctx);
+    // Signal must come before unlock to avoid emscripten_proxy_sync_with ctx
+    // seeing the state as DONE and freeing the ctx before we call unlock.
+    // See https://github.com/emscripten-core/emscripten/pull/26582
+    pthread_cond_signal(&ctx->sync.cond);
+    pthread_mutex_unlock(&ctx->sync.mutex);
+  } else {
+    // Schedule the callback on the caller thread. If the caller thread has
+    // already died or dies before the callback is executed, then at least make
+    // sure the context is freed.
+    remove_active_ctx(ctx);
+    if (!do_proxy(ctx->cb.queue,
+                  ctx->cb.caller_thread,
+                  (task){call_callback_then_free_ctx, free_ctx, ctx})) {
+      free_ctx(ctx);
+    }
+  }
+}
+
+static void call_cancel_then_free_ctx(void* arg) {
+  em_proxying_ctx* ctx = arg;
+  ctx->cb.cancel(ctx->arg);
+  free_ctx(ctx);
+}
+
+static void cancel_ctx(void* arg) {
+  em_proxying_ctx* ctx = arg;
+  if (ctx->kind == SYNC) {
+    pthread_mutex_lock(&ctx->sync.mutex);
+    ctx->sync.state = CANCELED;
+    // Signal must be first, see comment in emscripten_proxy_finish.
+    pthread_cond_signal(&ctx->sync.cond);
+    pthread_mutex_unlock(&ctx->sync.mutex);
+  } else {
+    if (ctx->cb.cancel == NULL ||
+        !do_proxy(ctx->cb.queue,
+                  ctx->cb.caller_thread,
+                  (task){call_cancel_then_free_ctx, free_ctx, ctx})) {
+      free_ctx(ctx);
+    }
+  }
 }
 
 // Helper for wrapping the call with ctx as a `void (*)(void*)`.
-static void call_with_ctx(void* p) {
-  em_proxying_ctx* ctx = (em_proxying_ctx*)p;
+static void call_with_ctx(void* arg) {
+  em_proxying_ctx* ctx = arg;
+  add_active_ctx(ctx);
   ctx->func(ctx, ctx->arg);
 }
 
-int emscripten_proxy_sync_with_ctx(em_proxying_queue* q,
+bool emscripten_proxy_sync_with_ctx(em_proxying_queue* q,
                                    pthread_t target_thread,
                                    void (*func)(em_proxying_ctx*, void*),
                                    void* arg) {
   assert(!pthread_equal(target_thread, pthread_self()) &&
          "Cannot synchronously wait for work proxied to the current thread");
   em_proxying_ctx ctx;
-  em_proxying_ctx_init(&ctx, func, arg);
-  if (!emscripten_proxy_async(q, target_thread, call_with_ctx, &ctx)) {
-    return 0;
+  em_proxying_ctx_init_sync(&ctx, func, arg);
+  if (!do_proxy(q, target_thread, (task){call_with_ctx, cancel_ctx, &ctx})) {
+    em_proxying_ctx_deinit(&ctx);
+    return false;
   }
-  pthread_mutex_lock(&ctx.mutex);
-  while (!ctx.done) {
-    pthread_cond_wait(&ctx.cond, &ctx.mutex);
+  pthread_mutex_lock(&ctx.sync.mutex);
+  while (ctx.sync.state == PENDING) {
+    pthread_cond_wait(&ctx.sync.cond, &ctx.sync.mutex);
   }
-  pthread_mutex_unlock(&ctx.mutex);
+  pthread_mutex_unlock(&ctx.sync.mutex);
+  int ret = ctx.sync.state == DONE;
   em_proxying_ctx_deinit(&ctx);
-  return 1;
+  return ret;
 }
 
 // Helper for signaling the end of the task after the user function returns.
-static void call_then_finish(em_proxying_ctx* ctx, void* arg) {
-  task* t = (task*)arg;
+static void call_then_finish_task(em_proxying_ctx* ctx, void* arg) {
+  task* t = arg;
   t->func(t->arg);
   emscripten_proxy_finish(ctx);
 }
 
-int emscripten_proxy_sync(em_proxying_queue* q,
+bool emscripten_proxy_sync(em_proxying_queue* q,
                           pthread_t target_thread,
                           void (*func)(void*),
                           void* arg) {
-  task t = {func, arg};
-  return emscripten_proxy_sync_with_ctx(q, target_thread, call_then_finish, &t);
+  task t = {.func = func, .arg = arg};
+  return emscripten_proxy_sync_with_ctx(
+    q, target_thread, call_then_finish_task, &t);
+}
+
+static bool do_proxy_callback(em_proxying_queue* q,
+                              pthread_t target_thread,
+                              void (*func)(em_proxying_ctx* ctx, void*),
+                              void (*callback)(void*),
+                              void (*cancel)(void*),
+                              void* arg,
+                              em_proxying_ctx* ctx) {
+  em_proxying_ctx_init_callback(
+    ctx, q, pthread_self(), func, callback, cancel, arg);
+  if (!do_proxy(q, target_thread, (task){call_with_ctx, cancel_ctx, ctx})) {
+    free_ctx(ctx);
+    return false;
+  }
+  return true;
+}
+
+bool emscripten_proxy_callback_with_ctx(em_proxying_queue* q,
+                                        pthread_t target_thread,
+                                        void (*func)(em_proxying_ctx* ctx,
+                                                     void*),
+                                        void (*callback)(void*),
+                                        void (*cancel)(void*),
+                                        void* arg) {
+  em_proxying_ctx* ctx = malloc(sizeof(*ctx));
+  if (ctx == NULL) {
+    return false;
+  }
+  return do_proxy_callback(q, target_thread, func, callback, cancel, arg, ctx);
+}
+
+typedef struct callback_ctx {
+  void (*func)(void*);
+  void (*callback)(void*);
+  void (*cancel)(void*);
+  void* arg;
+} callback_ctx;
+
+static void call_then_finish_callback(em_proxying_ctx* ctx, void* arg) {
+  callback_ctx* cb_ctx = arg;
+  cb_ctx->func(cb_ctx->arg);
+  emscripten_proxy_finish(ctx);
+}
+
+static void callback_call(void* arg) {
+  callback_ctx* cb_ctx = arg;
+  cb_ctx->callback(cb_ctx->arg);
+}
+
+static void callback_cancel(void* arg) {
+  callback_ctx* cb_ctx = arg;
+  if (cb_ctx->cancel != NULL) {
+    cb_ctx->cancel(cb_ctx->arg);
+  }
+}
+
+bool emscripten_proxy_callback(em_proxying_queue* q,
+                               pthread_t target_thread,
+                               void (*func)(void*),
+                               void (*callback)(void*),
+                               void (*cancel)(void*),
+                               void* arg) {
+  // Allocate the em_proxying_ctx and the user ctx as a single block that will
+  // be freed when the `em_proxying_ctx` is freed.
+  struct block {
+    em_proxying_ctx ctx;
+    callback_ctx cb_ctx;
+  };
+  struct block* block = malloc(sizeof(*block));
+  if (block == NULL) {
+    return false;
+  }
+  block->cb_ctx = (callback_ctx){func, callback, cancel, arg};
+  return do_proxy_callback(q,
+                           target_thread,
+                           call_then_finish_callback,
+                           callback_call,
+                           callback_cancel,
+                           &block->cb_ctx,
+                           &block->ctx);
+}
+
+typedef struct promise_ctx {
+  void (*func)(em_proxying_ctx*, void*);
+  void* arg;
+  em_promise_t promise;
+} promise_ctx;
+
+static void promise_call(em_proxying_ctx* ctx, void* arg) {
+  promise_ctx* promise_ctx = arg;
+  promise_ctx->func(ctx, promise_ctx->arg);
+}
+
+static void promise_fulfill(void* arg) {
+  promise_ctx* promise_ctx = arg;
+  emscripten_promise_resolve(promise_ctx->promise, EM_PROMISE_FULFILL, NULL);
+  emscripten_promise_destroy(promise_ctx->promise);
+}
+
+static void promise_reject(void* arg) {
+  promise_ctx* promise_ctx = arg;
+  emscripten_promise_resolve(promise_ctx->promise, EM_PROMISE_REJECT, NULL);
+  emscripten_promise_destroy(promise_ctx->promise);
+}
+
+static em_promise_t do_proxy_promise(em_proxying_queue* q,
+                                     pthread_t target_thread,
+                                     void (*func)(em_proxying_ctx*, void*),
+                                     void* arg,
+                                     em_promise_t promise,
+                                     em_proxying_ctx* ctx,
+                                     promise_ctx* promise_ctx) {
+  *promise_ctx = (struct promise_ctx){func, arg, promise};
+  if (!do_proxy_callback(q,
+                         target_thread,
+                         promise_call,
+                         promise_fulfill,
+                         promise_reject,
+                         promise_ctx,
+                         ctx)) {
+    emscripten_promise_resolve(promise, EM_PROMISE_REJECT, NULL);
+    return promise;
+  }
+  // Return a separate promise to ensure that the internal promise will stay
+  // alive until the callbacks are called.
+  em_promise_t ret = emscripten_promise_create();
+  emscripten_promise_resolve(ret, EM_PROMISE_MATCH, promise);
+  return ret;
+}
+
+em_promise_t emscripten_proxy_promise_with_ctx(em_proxying_queue* q,
+                                               pthread_t target_thread,
+                                               void (*func)(em_proxying_ctx*,
+                                                            void*),
+                                               void* arg) {
+  em_promise_t promise = emscripten_promise_create();
+  // Allocate the em_proxying_ctx and promise ctx as a single block that will be
+  // freed when the `em_proxying_ctx` is freed.
+  struct block {
+    em_proxying_ctx ctx;
+    promise_ctx promise_ctx;
+  };
+  struct block* block = malloc(sizeof(*block));
+  if (block == NULL) {
+    emscripten_promise_resolve(promise, EM_PROMISE_REJECT, NULL);
+    return promise;
+  }
+  return do_proxy_promise(
+    q, target_thread, func, arg, promise, &block->ctx, &block->promise_ctx);
+}
+
+em_promise_t emscripten_proxy_promise(em_proxying_queue* q,
+                                      pthread_t target_thread,
+                                      void (*func)(void*),
+                                      void* arg) {
+  em_promise_t promise = emscripten_promise_create();
+  // Allocate the em_proxying_ctx, promise ctx, and user task as a single block
+  // that will be freed when the `em_proxying_ctx` is freed.
+  struct block {
+    em_proxying_ctx ctx;
+    promise_ctx promise_ctx;
+    task task;
+  };
+  struct block* block = malloc(sizeof(*block));
+  if (block == NULL) {
+    emscripten_promise_resolve(promise, EM_PROMISE_REJECT, NULL);
+    return promise;
+  }
+  block->task = (task){.func = func, .arg = arg};
+  return do_proxy_promise(q,
+                          target_thread,
+                          call_then_finish_task,
+                          &block->task,
+                          promise,
+                          &block->ctx,
+                          &block->promise_ctx);
+}
+
+typedef struct proxied_js_func_t {
+  int funcIndex;
+  void* emAsmAddr;
+  pthread_t callingThread;
+  int bufSize;
+  double* argBuffer;
+  double result;
+  bool owned;
+  // Whether the result fulfilled (rather than rejected) the function's
+  // Promise, when run with a context.
+  bool fulfilled;
+} proxied_js_func_t;
+
+static void run_js_func(void* arg) {
+  proxied_js_func_t* f = (proxied_js_func_t*)arg;
+  f->result = _emscripten_receive_on_main_thread_js(
+    f->funcIndex, f->emAsmAddr, f->callingThread, f->bufSize, f->argBuffer, 0, 0);
+  if (f->owned) {
+    free(f->argBuffer);
+    free(f);
+  }
+}
+
+static void run_js_func_with_ctx(em_proxying_ctx* ctx, void* arg) {
+  proxied_js_func_t* f = (proxied_js_func_t*)arg;
+  _emscripten_receive_on_main_thread_js(
+    f->funcIndex, f->emAsmAddr, f->callingThread, f->bufSize, f->argBuffer, ctx, arg);
+
+  // The arg of a function run with a context is never freed on the main
+  // thread: it is owned by the calling thread, which reads the result from it.
+  assert(!f->owned);
+}
+
+void _emscripten_run_js_on_main_thread_done(void* ctx, void* arg, double result, bool fulfilled) {
+  proxied_js_func_t* f = (proxied_js_func_t*)arg;
+  f->result = result;
+  f->fulfilled = fulfilled;
+  emscripten_proxy_finish(ctx);
+}
+
+/*
+ * The 'proxy_mode' argument to _emscripten_run_js_on_main_thread has 3 possible
+ * values:
+ *
+ * - PROXY_ASYNC: Returns immediately on the calling thread, does not signal
+ * - PROXY_SYNC: Synchronous on the calling thread, and also on the main thread
+ * - PROXY_SYNC_ASYNC: Synchronous on the calling thread, but async on the main
+ *   thread.
+ *
+ * Note: 'PROXY_SYNC_ASYNC' is only passed when a function is marked as
+ * both "__async" and "__proxy: 'sync'"
+ */
+#define PROXY_ASYNC 0
+#define PROXY_SYNC 1
+#define PROXY_SYNC_ASYNC 2
+
+double _emscripten_run_js_on_main_thread(int func_index,
+                                         void* em_asm_addr,
+                                         int buf_size,
+                                         double* buffer,
+                                         int proxyMode) {
+  proxied_js_func_t f = {
+    .funcIndex = func_index,
+    .emAsmAddr = em_asm_addr,
+    .callingThread = pthread_self(),
+    .bufSize = buf_size,
+    .argBuffer = buffer,
+    .owned = false,
+  };
+
+  em_proxying_queue* q = emscripten_proxy_get_system_queue();
+  pthread_t target = emscripten_main_runtime_thread_id();
+
+  if (proxyMode != PROXY_ASYNC) {
+    int rtn;
+    if (proxyMode == PROXY_SYNC_ASYNC) {
+      rtn = emscripten_proxy_sync_with_ctx(q, target, run_js_func_with_ctx, &f);
+    } else {
+      rtn = emscripten_proxy_sync(q, target, run_js_func, &f);
+    }
+    if (!rtn) {
+      assert(false && "emscripten_proxy_sync_with_ctx failed");
+      return 0;
+    }
+    return f.result;
+  }
+
+  // Make a heap allocated copy of the proxied_js_func_t
+  proxied_js_func_t* arg = malloc(sizeof(proxied_js_func_t));
+  *arg = f;
+  arg->owned = true;
+
+  // Also make a copy of the argBuffer.
+  arg->argBuffer = malloc(buf_size);
+  memcpy(arg->argBuffer, buffer, buf_size);
+
+  if (!emscripten_proxy_async(q, target, run_js_func, arg)) {
+    assert(false && "emscripten_proxy_async failed");
+  }
+  return 0;
+}
+
+// Settles the promise of _emscripten_run_js_on_main_thread_promise with the
+// result left in `arg`.
+static em_promise_result_t js_promise_settle(void** result, void* data, void* value) {
+  proxied_js_func_t* f = (proxied_js_func_t*)data;
+  em_promise_result_t rtn = f->fulfilled ? EM_PROMISE_FULFILL : EM_PROMISE_REJECT;
+  *result = (void*)(intptr_t)f->result;
+  free(f->argBuffer);
+  free(f);
+  return rtn;
+}
+
+// Returns immediately on the calling thread with an em_promise_t; async on the
+// main thread, whose result settles it once the calling thread runs its queue
+// (emscripten_proxy_promise_with_ctx). Rejected with NULL if the function's
+// Promise rejected.
+em_promise_t _emscripten_run_js_on_main_thread_promise(int func_index,
+                                                       void* em_asm_addr,
+                                                       int buf_size,
+                                                       double* buffer) {
+  proxied_js_func_t* arg = malloc(sizeof(proxied_js_func_t));
+  *arg = (proxied_js_func_t){
+    .funcIndex = func_index,
+    .emAsmAddr = em_asm_addr,
+    .callingThread = pthread_self(),
+    .bufSize = buf_size,
+    .argBuffer = malloc(buf_size),
+  };
+  memcpy(arg->argBuffer, buffer, buf_size);
+  em_promise_t done = emscripten_proxy_promise_with_ctx(
+    emscripten_proxy_get_system_queue(),
+    emscripten_main_runtime_thread_id(),
+    run_js_func_with_ctx,
+    arg);
+  // The function's own Promise rejecting is carried in `arg->fulfilled`, with
+  // `done` fulfilled either way; `done` itself is rejected only if the
+  // proxying failed (the target thread exited before running it), leaving
+  // `fulfilled` false. Both outcomes settle from `arg` and free it.
+  em_promise_t promise =
+    emscripten_promise_then(done, js_promise_settle, js_promise_settle, arg);
+  emscripten_promise_destroy(done);
+  return promise;
 }
